@@ -1,0 +1,140 @@
+\documentclass[10pt, t, xcolor={dvipsnames}]{beamer}
+\usetheme{default}
+\usepackage[english]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{subfig}
+\captionsetup[subfigure]{labelformat=empty}
+\usepackage{multirow}
+\hypersetup{colorlinks=true,linkcolor=red,urlcolor=blue,citecolor=blue}
+
+\usepackage{pdfpages}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{bm}
+\usepackage{tabularx}
+
+\usepackage{mathtools}
+
+\usepackage{eso-pic}%to put pictures whereever
+\usefonttheme[onlymath]{serif}%nice equations
+
+\usepackage[absolute,overlay]{textpos}%textblocks
+
+\setlength{\leftmargini}{0pt}
+
+\usepackage{xcolor}%for nicer colours
+\definecolor{dgreen}{rgb}{0.,0.6,0.}
+\definecolor{dblue}{rgb}{0.2392,0.0862,0.5922}%lhcb colours
+\definecolor{lblue}{rgb}{0.7882,0.9059,0.9059}
+\definecolor{dred}{rgb}{0.8824,0.0392,0.0000}
+\definecolor{amber}{rgb}{1.0, 0.49, 0.0}
+\definecolor{burntorange}{rgb}{0.8, 0.33, 0.0}
+\definecolor{dcyan}{rgb}{0.0, 0.55, 0.55}
+\definecolor{americanrose}{rgb}{1.0, 0.01, 0.24}
+\definecolor{frenchlilac}{rgb}{0.53, 0.38, 0.56}
+\definecolor{atomictangerine}{rgb}{1.0, 0.6, 0.4}
+\definecolor{goldenpoppy}{rgb}{0.99, 0.76, 0.0}
+
+\newcommand{\para}{{\small \parallel}}
+
+\setbeamertemplate{navigation symbols}{}
+\author{Martin Andersson}
+
+% textpos units for absolute logo placement
+\setlength{\TPHorizModule}{1cm}
+\setlength{\TPVertModule}{1cm}
+\textblockorigin{0mm}{0mm}% origin at top-left corner of the page
+
+% Nice rule under the frame title
+\setbeamercolor{frametitle}{fg=dblue}
+\setbeamertemplate{frametitle}{%
+  \vskip0.6em
+  \usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}\insertframetitle\par
+  \vskip0.15em
+  {\color{dblue}\rule{\textwidth}{1.2pt}}\par
+  \vskip0.3em
+}
+
+\usepackage{enumitem}
+\setitemize{itemsep=4pt}
+
+\setbeamerfont{footline}{size=\fontsize{6}{6}\selectfont}
+\setbeamercolor{section in foot}{fg=dblue, bg=lblue}
+\setbeamercolor{subsection in foot}{fg=dblue, bg=lblue}
+\setbeamercolor{subsubsection in foot}{fg=lblue, bg=dblue}
+\setbeamertemplate{footline}
+{
+  \leavevmode%
+  \hbox{%
+  \begin{beamercolorbox}[wd=.25\paperwidth,ht=2.1ex,dp=1ex,center]{section in foot}%
+    \usebeamerfont{title in head/foot} Weekly meeting%
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.25\paperwidth,ht=2.1ex,dp=1ex,center]{section in foot}%
+    \usebeamerfont{title in head/foot} Project title%
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.25\paperwidth,ht=2.1ex,dp=1ex,center]{subsubsection in foot}%
+    \usebeamerfont{date in head/foot} Martin Andersson%
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.25\paperwidth,ht=2.1ex,dp=1ex,right]{subsubsection in foot}%
+    \usebeamerfont{date in head/foot}\insertframenumber{} {\color{lblue} \textbf{/}} \inserttotalframenumber\hspace*{2ex}%
+  \end{beamercolorbox}%
+  }%
+  \vskip0pt%
+}
+
+\begin{document}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Title page
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}[plain]
+
+\begin{textblock*}{3cm}(9.5cm,0.25cm)
+  \includegraphics[width=3cm,keepaspectratio]{uzhlogo.png}
+\end{textblock*}
+
+\center
+\vspace{2cm}
+\noindent\makebox[\linewidth]{\rule{\linewidth}{0.6pt}}
+\textsc{ \color{Blue}\textbf{\large Presentation title}}
+\noindent\makebox[\linewidth]{\rule{\linewidth}{0.6pt}} \\
+\vspace{0.3cm}
+Martin Andersson\\
+\vspace{0.5cm}
+Z\"urich
+
+\begin{small}
+\vspace{0.4cm}
+\end{small}
+
+\vspace{0.7cm}
+\today
+
+\end{frame}
+
+% Put the UZH logo in the upper-right corner of every following slide
+\newcommand\AtPagemyUpperLeft[2]{\AtPageLowerLeft{%
+\put(\LenToUnit{0.87\paperwidth},\LenToUnit{0.88\paperheight}){#1}}}
+\AddToShipoutPictureFG{
+  \AtPagemyUpperLeft{{\includegraphics[width=1.5cm,keepaspectratio]{uzhlogo.png}}}
+}
+\addtocounter{framenumber}{-1}  %the next frame will start from number 1 instead of 2
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% First content slide (layout template)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}{Slide title}
+\begin{itemize}[font=$\bullet$\scshape\bfseries]
+    \item First point
+    \item Second point
+    \item Third point
+\end{itemize}
+\vspace*{1cm}
+
+\end{frame}
+
+
+\end{document}
