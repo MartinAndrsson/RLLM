@@ -44,6 +44,10 @@ def main(argv=None):
     p = sub.add_parser("promote"); p.add_argument("work_dir")
     p.add_argument("--from", dest="frm", required=True); p.add_argument("--to", required=True)
     p.add_argument("--top-k", type=int, default=3)
+    pr = sub.add_parser("propose"); pr.add_argument("work_dir")
+    pr.add_argument("--actor", default="claude", choices=["claude", "codex"])
+    pr.add_argument("--reviewer", default="codex", choices=["claude", "codex"])
+    pr.add_argument("-n", type=int, default=4)
     args = ap.parse_args(argv)
 
     if args.cmd == "seed":
@@ -55,6 +59,15 @@ def main(argv=None):
     elif args.cmd == "promote":
         ids = ladder.promote(ADAPTER, args.work_dir, args.frm, args.to, args.top_k)
         print(f"promoted to {args.to}: {ids}")
+    elif args.cmd == "propose":
+        from rllm.llm.backend import CLIBackend
+        from rllm.llm import controller
+        mk = {"claude": CLIBackend.claude, "codex": CLIBackend.codex}
+        actor, reviewer = mk[args.actor](), mk[args.reviewer]()
+        res = controller.propose_and_review(actor, reviewer, ADAPTER, args.work_dir, n=args.n)
+        print(f"actor={args.actor} reviewer={args.reviewer} -> {res.get('action')}: "
+              f"{res.get('ids', res.get('verdict'))}")
+        print("(review-gated; nothing trains until you run `work`)")
     elif args.cmd == "status":
         _status(args.work_dir)
 
