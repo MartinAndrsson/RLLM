@@ -351,7 +351,10 @@ def test_llm_call_cap_stops_proposing(tmp_path):
                           maximum_llm_calls=2)
     state = session.run()
     assert state.ledger["llm_calls"] <= 2
-    assert state.terminal_reason in ("budget_exhausted", "no_work_fits", "solved", "stalled")
+    # A cap so tight that no proposal can be made means nothing runs — reported as a blockage naming
+    # the cap, not as the uninformative "no work fits".
+    assert state.terminal_reason == "blocked"
+    assert "LLM calls" in state.blocked_reason
     assert (session.dir / "handoff.md").exists()
 
 

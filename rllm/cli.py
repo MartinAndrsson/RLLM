@@ -222,11 +222,21 @@ def _solve(args):
         brief.session_budget.explore_seconds = parse_duration(args.until)
         brief.session_budget.wind_down_seconds = min(brief.session_budget.wind_down_seconds,
                                                     brief.session_budget.explore_seconds / 4)
-    problems = _adapter_problems(adapter)
+    from rllm import preflight
+    problems = preflight.check(brief, adapter, args.work_dir, need_llm=not args.no_llm)
     if problems:
-        print("refusing to start a session — adapter/brief inconsistent:", file=sys.stderr)
+        # Refuse in seconds rather than discovering it one failed run at a time overnight.
+        print(f"REFUSING TO START — {len(problems)} problem(s) would stop this session producing "
+              f"anything:\n", file=sys.stderr)
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
+        print("\nFix these and re-run the same command. Nothing was started.", file=sys.stderr)
+        Path(args.work_dir).mkdir(parents=True, exist_ok=True)
+        (Path(args.work_dir) / "BLOCKED.md").write_text(
+            "# This problem is blocked before it can start\n\n"
+            + "\n".join(f"- {p}" for p in problems)
+            + f"\n\nFix these, then re-run:\n\n    python -m rllm.cli solve {args.work_dir} "
+              f"--device {args.device}\n\nDelete this file once resolved.\n")
         raise SystemExit(2)
     actor, reviewer, handoff_actor, handoff_reviewer = _backends(args)
     if actor is not None:
@@ -239,6 +249,9 @@ def _solve(args):
     state = session.run()
     rec = state.recommendation or {}
     print()
+    if state.terminal_reason in ("blocked", "failed"):
+        print(f"STOPPED: {state.blocked_reason or 'the session could not continue'}")
+        print(f"Nothing was measured. See {Path(args.work_dir) / 'BLOCKED.md'}")
     print(f"session {state.session_id} ended: {state.terminal_reason}")
     led = state.ledger
     cost = (f", ${led['llm_cost_usd']:.2f}" if led.get("llm_cost_known") else ", cost partly unreported")

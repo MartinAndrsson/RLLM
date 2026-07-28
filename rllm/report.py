@@ -35,6 +35,17 @@ def write_handoff(session, terminal_reason: str) -> Path:
     path.write_text(_render(session, terminal_reason, evidence))
     (session.dir / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     _append_journal(session, terminal_reason, evidence)
+    # A blockage must be findable without knowing the session id.
+    marker = Path(session.work_dir) / "BLOCKED.md"
+    if terminal_reason in ("blocked", "failed"):
+        marker.write_text(
+            f"# This problem is blocked\n\n{session.state.blocked_reason or 'see the handoff'}\n\n"
+            f"Full detail, including the failing runs' output: `{path}`\n\n"
+            f"Fix the cause, then re-run:\n\n"
+            f"    python -m rllm.cli solve {session.work_dir} --device {session.state.device}\n\n"
+            f"Delete this file once resolved.\n")
+    elif marker.exists():
+        marker.unlink()          # the problem now runs; stale warnings mislead
     return path
 
 
@@ -52,6 +63,31 @@ def _render(session, terminal_reason: str, evidence: dict) -> str:
     add(f"**Brief:** `{st.brief_sha256[:12]}` (frozen for this session)  |  **repo:** "
         f"`{brief.problem_repo}`  |  **device:** `{st.device}`")
     add("")
+
+    # ---- if it could not continue, that is the headline ----
+    if terminal_reason in ("blocked", "failed"):
+        add("## ⚠ STOPPED — I could not continue without you")
+        add("")
+        add(st.blocked_reason or "The session hit an error it could not work around.")
+        add("")
+        add("Nothing below is a result: the runs did not produce measurements. Fix the cause and re-run "
+            "the same command — the queue and registry are intact, so nothing is lost.")
+        failures = evidence.get("recent_failures") or []
+        if failures:
+            add("")
+            add("### What actually failed")
+            for f in failures:
+                add("")
+                add(f"**`{f['experiment']}` seed {f['seed']} (`{f['fidelity']}`)** — {f['error']}")
+                if f.get("command") and f["command"] != "(command not recorded)":
+                    add("")
+                    add(f"Invoked as: `{f['command']}`")
+                if f.get("log") and f["log"] not in ("(no log captured)", "(empty log)"):
+                    add("")
+                    add("```")
+                    add(f["log"])
+                    add("```")
+        add("")
 
     # ---- the answer the user actually wants, up front ----
     add("## Recommendation")

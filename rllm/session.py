@@ -35,7 +35,15 @@ from .llm.backend import LLMBackend, Usage
 from .registry import Registry
 
 STATES = ("initializing", "planning", "executing", "evaluating", "confirming", "winding_down")
-TERMINAL = ("solved", "stalled", "budget_exhausted", "deadline_reached", "no_work_fits", "failed")
+TERMINAL = ("solved", "stalled", "budget_exhausted", "deadline_reached", "no_work_fits", "failed",
+            "blocked")
+
+# "Nothing is working" thresholds. A session whose runs keep failing must stop and say so: proposing new
+# experiments into a broken setup burns the window, the run cap and the subscription allowance and
+# produces nothing. A live session lost 7 runs, 8 waves and 14 LLM calls exactly this way.
+BLOCKED_AFTER_FAILURES = 3       # consecutive failures when NOTHING has ever succeeded
+BLOCKED_AFTER_FAILURES_LATE = 8  # consecutive failures after something did work (a mid-run regression)
+BLOCKED_AFTER_EMPTY_WAVES = 2    # consecutive waves where the review gate authorized nothing at all
 
 STALL_WAVES = 3                  # waves with no improvement in the best result before declaring a stall
 PROMOTION_TOP_K = {1: 3, 2: 2}   # rung index -> how many candidates get promoted into it
@@ -57,6 +65,10 @@ class SessionState:
     ended_at: str = ""
     wave: int = 0
     waves_without_improvement: int = 0
+    consecutive_failures: int = 0
+    consecutive_unauthorized: int = 0      # waves where the models proposed but nothing was approved
+    last_block_reasons: list[str] = field(default_factory=list)
+    blocked_reason: str = ""
     best_key: list[float] = field(default_factory=list)
     actions: list[dict] = field(default_factory=list)      # audit trail of what each wave did
     ledger: dict = field(default_factory=lambda: Ledger().as_dict())
@@ -192,8 +204,24 @@ class Session:
                 self.state.wave += 1
                 acted = self._wave()
                 if not acted:
-                    self._finish("no_work_fits" if self.seconds_until_wind_down() > 0
-                                 else "deadline_reached")
+                    if self.seconds_until_wind_down() <= 0:
+                        self._finish("deadline_reached")
+                    elif self.ledger.runs_launched == 0 and self._fits(self.rungs[0]):
+                        # Nothing ever ran. That is a setup or gate problem, not a short window —
+                        # reporting it as "no work fits" tells the user nothing they can act on.
+                        limits = "; ".join(self.ledger.stopped_because)[:400]
+                        self.state.blocked_reason = self._blocked() or (
+                            "no experiment was ever authorized or started, so nothing was measured. "
+                            + (f"The review gate's stated reasons: "
+                               f"{'; '.join(self.state.last_block_reasons)[:900]}"
+                               if self.state.last_block_reasons else
+                               f"A budget limit stopped it before it could propose: {limits}"
+                               if limits else
+                               "No proposal reached the queue — check `rllm.cli validate` and the knob "
+                               "table; with nothing proposable there is nothing to run."))
+                        self._finish("blocked")
+                    else:
+                        self._finish("no_work_fits")
                     break
                 if self._stalled():
                     self._finish("stalled")
@@ -229,10 +257,45 @@ class Session:
         return bool(ladder.rank(self.adapter, self.work_dir,
                                 self.brief.success_criterion.required_fidelity))
 
+    def _blocked(self) -> str | None:
+        """Is the SETUP broken, rather than the problem hard?
+
+        Distinct from a stall: a stall means good runs stopped improving; this means runs are not
+        producing results at all — a missing interpreter, an unrunnable variant, a metrics file that never
+        appears. The right response is to stop and hand the specific error to the user, not to try another
+        idea, so this is checked before every wave and ends the session when it fires.
+        """
+        if (self.state.consecutive_unauthorized >= BLOCKED_AFTER_EMPTY_WAVES
+                and self.ledger.runs_launched == 0 and self._fits(self.rungs[0])):
+            why = ("; ".join(self.state.last_block_reasons)[:900]
+                   or "no reason was recorded by the reviewer")
+            return (f"the review gate authorized no experiments for "
+                    f"{self.state.consecutive_unauthorized} consecutive waves, so nothing ran. "
+                    f"Stated reasons: {why}")
+        failures = self.state.consecutive_failures
+        if not failures:
+            return None
+        succeeded = any(r.status == "done" and "error" not in r.metrics
+                        for r in self.registry.all_results())
+        limit = BLOCKED_AFTER_FAILURES_LATE if succeeded else BLOCKED_AFTER_FAILURES
+        if failures < limit:
+            return None
+        errors = [str(r.metrics.get("error", "unknown")) for r in self.registry.all_results()
+                  if r.status != "done"]
+        detail = errors[-1][:600] if errors else "no error recorded"
+        return (f"{failures} runs in a row failed and "
+                + ("nothing has ever succeeded on this problem" if not succeeded
+                   else "the setup appears to have broken mid-session")
+                + f". Most recent error: {detail}")
+
     def _stop_reason(self) -> str | None:
         """Deterministic stop conditions (§10.4), checked before every wave."""
         if self.seconds_until_wind_down() <= 0:
             return "deadline_reached"
+        blocked = self._blocked()
+        if blocked:
+            self.state.blocked_reason = blocked
+            return "blocked"
         exhausted = self.ledger.exhausted(self.budget)
         if exhausted:
             return "budget_exhausted"
@@ -282,6 +345,11 @@ class Session:
 
     def _on_result(self, result) -> None:
         self.ledger.record_run(result)
+        self.state.consecutive_unauthorized = 0   # work is flowing; refused proposals aren't a blockage
+        if result.status == "done":
+            self.state.consecutive_failures = 0
+        else:
+            self.state.consecutive_failures += 1
         self._persist()
 
     # ---------------- planning: cheap and broad first, deep only when it fits ----------------
@@ -358,14 +426,19 @@ class Session:
         finally:
             self._account(before)
         if res.get("action") != "enqueued" or not res.get("ids"):
-            # Nothing new was authorized (blocked, or every idea was a duplicate). Record the attempt
-            # for the audit trail, but return no plan so the wave can still escalate instead of running
-            # an empty queue.
+            # Nothing new was authorized (the reviewer blocked it, or every idea was a duplicate).
+            # Record WHY: a session that ends having run nothing must be able to tell the user whether
+            # its own review gate refused everything, and on what grounds.
+            reasons = [str(r) for r in ((res.get("verdict") or {}).get("reasons") or [])]
+            self.state.last_block_reasons = reasons[:5] + [str(r) for r in
+                                                          (res.get("rejected") or [])[:5]]
+            self.state.consecutive_unauthorized += 1
             self.state.actions.append({"wave": self.state.wave, "action": "propose",
                                        "result": res.get("action"), "ids": [], "explored": False,
                                        "note": "nothing new was approved",
-                                       "rejected": (res.get("rejected") or [])[:5]})
+                                       "reasons": self.state.last_block_reasons})
             return []
+        self.state.consecutive_unauthorized = 0
         return [{"action": "propose", "fidelity": cheapest, "ids": res["ids"],
                  "jobs": res.get("jobs", 0), "explored": True}]
 
@@ -503,6 +576,12 @@ class Session:
                                            prompts.handoff_review_user(rec, evidence, reason)))
             self._account(before)
             rec = _clean_recommendation(rec)
+            if reason in ("blocked", "failed"):
+                # "The runs failed" is a deterministic fact, not an interpretation. The models add the
+                # diagnosis and the questions; they do not get to reclassify a blockage as something
+                # milder (§2.1).
+                rec["recommendation"] = fallback["recommendation"]
+                rec["model_recommendation"] = _clean_recommendation(parse_json(raw))["recommendation"]
             rec["reviewer_verdict"] = str(crit.get("verdict", "")).lower()
             rec["reviewer_notes"] = crit.get("reasons") or []
             rec["source"] = (f"actor={actor.name}({actor.model or 'default'}), "
@@ -546,6 +625,8 @@ def _deterministic_recommendation(session: "Session", reason: str) -> dict:
     best_top = session.best_at(top)
     if reason == "solved":
         rec = "solved"
+    elif reason in ("blocked", "failed"):
+        rec = "needs_help"
     elif reason == "stalled":
         rec = "needs_help"
     elif best_top and session.brief.unmet(best_top[1]) == []:
@@ -559,9 +640,11 @@ def _deterministic_recommendation(session: "Session", reason: str) -> dict:
     unmet = session.brief.unmet(best_top[1]) if best_top else [c.describe() for c
                                                                in session.brief.success_criterion
                                                                .all_constraints()]
+    reasoning = f"terminal reason {reason}; unmet at '{top}': {', '.join(unmet) or 'nothing'}"
+    if session.state.blocked_reason:
+        reasoning = f"BLOCKED: {session.state.blocked_reason}"
     return {"recommendation": rec, "confidence": "unknown", "source": "deterministic",
-            "reasoning": (f"terminal reason {reason}; unmet at '{top}': "
-                          f"{', '.join(unmet) or 'nothing'}"),
+            "reasoning": reasoning,
             "estimated_additional_time": "", "next_experiments": [],
             "questions_for_human": [], "requests_requiring_authority": []}
 
@@ -601,9 +684,35 @@ def report_evidence(session: "Session") -> dict[str, Any]:
         "observed_run_seconds": {fid: round(session.estimator.seconds(fid))
                                  for fid in session.rungs},
         "estimates_are_observed": {fid: session.estimator.is_observed(fid) for fid in session.rungs},
+        "blocked_reason": session.state.blocked_reason or None,
+        "recent_failures": [
+            {"experiment": r.exp_id, "seed": r.seed, "fidelity": r.fidelity,
+             "error": str(r.metrics.get("error", "unknown"))[:800],
+             "command": _read_command(r.run_dir),
+             "log": _tail_log(r.run_dir)}
+            for r in session.registry.all_results() if r.status != "done"][-5:],
         "realism_constraints": session.brief.realism_constraints,
         "forbidden_task_changes": session.brief.forbidden_task_changes,
     }
+
+
+def _read_command(run_dir: str) -> str:
+    """How the run was actually invoked. Without it a diagnosis has to guess at the environment — a live
+    handoff asked the user whether the harness sets PYTHONPATH, which the command line answers."""
+    try:
+        return (Path(run_dir) / "command.txt").read_text(errors="replace").strip()[:1200]
+    except OSError:
+        return "(command not recorded)"
+
+
+def _tail_log(run_dir: str, lines: int = 20) -> str:
+    """Tail of a failed run's captured output. Without it a model can only guess at the cause — a live
+    handoff had to ask the user to paste the traceback itself."""
+    try:
+        text = (Path(run_dir) / "run.log").read_text(errors="replace").strip()
+    except OSError:
+        return "(no log captured)"
+    return "\n".join(text.splitlines()[-lines:])[-2000:] if text else "(empty log)"
 
 
 def _fmt_key(key: tuple) -> str:

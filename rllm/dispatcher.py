@@ -177,6 +177,7 @@ def _loop(adapter, queue, registry, runs_dir, device, dry_run, poll_seconds, max
             print(f"[dry-run] {job['job_id']}: {' '.join(cmd)}")
             held.append(job)
             continue
+        (Path(run_dir) / "command.txt").write_text(" ".join(cmd) + "\n")
         t0 = time.perf_counter()
         ok = True
         timeout = per_run_timeout(job["fidelity"]) if per_run_timeout else None

@@ -301,3 +301,160 @@ def test_the_default_interpreter_is_one_that_exists(tmp_path):
     adapter = BriefAdapter(brief)
     assert adapter._python == sys.executable
     assert Path(adapter._python).exists()
+
+
+# ---------------------------------------------------------------- stop and tell the user
+
+def test_a_session_whose_runs_all_fail_stops_and_reports(tmp_path):
+    """The failure this exists for: a live session lost 7 runs, 8 waves and 14 LLM calls proposing new
+    experiments into a setup where nothing could run."""
+    _, adapter, wd = build(tmp_path, {"broken": "import sys\nsys.exit('cannot import simulator')\n"})
+    brief = problem_mod.load_brief(wd)
+    actor = MockBackend([json.dumps({"experiments": [
+        {"id": f"try{i}", "hypothesis": "another idea", "config": {"BONUS": i / 10}}]})
+        for i in range(1, 9)])
+    reviewer = MockBackend([json.dumps({"verdict": "approve",
+                                        "approved_item_ids": [f"try{i}"]}) for i in range(1, 9)])
+    session = Session(adapter, brief, wd, actor=actor, reviewer=reviewer, log=lambda *_: None,
+                      cheap_run_seconds=1.0, startup_overhead=0.5)
+    state = session.run()
+    assert state.terminal_reason == "blocked"
+    assert "cannot import simulator" in state.blocked_reason
+    # It stopped early instead of burning the whole budget on a broken setup.
+    assert state.ledger["runs_launched"] <= 4, state.ledger
+    assert state.recommendation["recommendation"] == "needs_help"
+
+
+def test_the_blockage_is_impossible_to_miss(tmp_path):
+    _, adapter, wd = build(tmp_path, {"broken": "raise SystemExit('boom')\n"})
+    brief = problem_mod.load_brief(wd)
+    for i in range(3):
+        ladder.enqueue_experiments(adapter, wd, [
+            ExperimentSpec(f"cand{i}", "h", {"BONUS": i / 10})], "screen")
+    session = Session(adapter, brief, wd, log=lambda *_: None, cheap_run_seconds=1.0,
+                      startup_overhead=0.5)
+    session.run()
+    marker = Path(wd) / "BLOCKED.md"
+    assert marker.exists()
+    assert "re-run" in marker.read_text()
+    handoff = (session.dir / "handoff.md").read_text()
+    assert "STOPPED" in handoff
+    assert "boom" in handoff                       # the actual error, not a generic message
+    assert handoff.index("STOPPED") < handoff.index("## Recommendation")   # it leads
+
+
+def test_a_working_session_clears_a_stale_blocked_marker(tmp_path):
+    _, adapter, wd = two_designs(tmp_path)
+    (Path(wd) / "BLOCKED.md").write_text("# stale warning from a previous run\n")
+    brief = problem_mod.load_brief(wd)
+    ladder.enqueue_experiments(adapter, wd, [
+        ExperimentSpec("fine", "works", {"VARIANT": "shaped", "BONUS": 0.5})], "screen")
+    Session(adapter, brief, wd, log=lambda *_: None, cheap_run_seconds=1.0,
+            startup_overhead=0.5).run()
+    assert not (Path(wd) / "BLOCKED.md").exists()
+
+
+def test_occasional_failures_do_not_block_a_working_session(tmp_path):
+    """One bad config among good ones is a result, not a blockage."""
+    _, adapter, wd = two_designs(tmp_path)
+    brief = problem_mod.load_brief(wd)
+    session = Session(adapter, brief, wd, log=lambda *_: None, cheap_run_seconds=1.0,
+                      startup_overhead=0.5)
+    from rllm.interfaces import RunResult
+    for status, metrics in (("done", {"score": 0.5}), ("failed", {"error": "one bad config"}),
+                            ("failed", {"error": "another"})):
+        session.registry.put_result(RunResult("x", 1, "screen", str(tmp_path), status, metrics, 1.0))
+        session._on_result(RunResult("x", 1, "screen", str(tmp_path), status, metrics, 1.0))
+    assert session._blocked() is None                    # 2 failures, but something worked
+
+
+def test_the_models_are_told_to_diagnose_not_to_plan(tmp_path):
+    _, adapter, wd = build(tmp_path, {"broken": "raise SystemExit('import error')\n"})
+    brief = problem_mod.load_brief(wd)
+    for i in range(3):
+        ladder.enqueue_experiments(adapter, wd, [ExperimentSpec(f"c{i}", "h", {"BONUS": i / 10})],
+                                   "screen")
+    actor = MockBackend([json.dumps({"recommendation": "needs_help", "confidence": "high",
+                                     "reasoning": "the variant cannot import the simulator"})] * 3)
+    reviewer = MockBackend([json.dumps({"verdict": "approve"})] * 3)
+    session = Session(adapter, brief, wd, log=lambda *_: None, cheap_run_seconds=1.0,
+                      startup_overhead=0.5, handoff_actor=actor, handoff_reviewer=reviewer)
+    session.run()
+    prompt = actor.calls[0][1]
+    assert "DIAGNOSIS" in prompt                     # the role switch
+    assert "import error" in prompt                  # the actual error text
+    assert "recent_failures" in prompt
+    assert session.state.recommendation["recommendation"] == "needs_help"
+
+
+# ---------------------------------------------------------------- preflight
+
+def test_preflight_refuses_a_missing_interpreter(tmp_path):
+    from rllm import preflight
+    brief, adapter, wd = two_designs(tmp_path)
+    brief.adapter.config["python"] = "/nonexistent/python"
+    problems = preflight.check(brief, BriefAdapter(brief), wd, need_llm=False)
+    assert any("interpreter" in p for p in problems)
+
+
+def test_preflight_refuses_an_unreachable_criterion(tmp_path):
+    """A criterion needing more seeds than the top rung runs can never be met."""
+    from rllm import preflight
+    brief, adapter, wd = two_designs(tmp_path)
+    brief.success_criterion.minimum_training_seeds = 99
+    problems = preflight.check(brief, adapter, wd, need_llm=False)
+    assert any("unreachable by construction" in p for p in problems)
+
+
+def test_preflight_refuses_when_nothing_is_runnable(tmp_path):
+    from rllm import preflight
+    brief, _, wd = build(tmp_path, {})
+    problems = preflight.check(brief, BriefAdapter(brief), wd, need_llm=False)
+    assert any("nothing to run" in p for p in problems)
+
+
+def test_preflight_refuses_an_absolute_metrics_path(tmp_path):
+    from rllm import preflight
+    brief, adapter, wd = two_designs(tmp_path)
+    brief.metrics_file = "/tmp/metrics.json"
+    problems = preflight.check(brief, adapter, wd, need_llm=False)
+    assert any("must be relative" in p for p in problems)
+
+
+def test_preflight_refuses_when_no_knob_is_proposable(tmp_path):
+    from rllm import preflight
+    brief, _, wd = two_designs(tmp_path)
+    brief.adapter.config["knobs"] = [
+        {"name": "LOCKED", "value_type": "int", "default": 1, "category": "training_budget",
+         "llm_may_change": False}]
+    brief.adapter.config["variants_dir"] = str(tmp_path / "none")   # no variants either
+    brief.test_command = "true"
+    problems = preflight.check(brief, BriefAdapter(brief), wd, need_llm=False)
+    assert any("no knob is proposable" in p for p in problems)
+
+
+def test_preflight_passes_a_healthy_setup(tmp_path):
+    from rllm import preflight
+    brief, adapter, wd = two_designs(tmp_path)
+    assert preflight.check(brief, adapter, wd, need_llm=False) == []
+
+
+def test_solve_refuses_to_start_and_writes_a_marker(tmp_path):
+    from rllm import cli
+    brief, _, wd = build(tmp_path, {})          # nothing runnable
+    brief.save(problem_mod.brief_path(wd))
+    with pytest.raises(SystemExit):
+        cli.main(["solve", str(wd), "--no-llm"])
+    assert "nothing to run" in (Path(wd) / "BLOCKED.md").read_text()
+    assert not (Path(wd) / "sessions").exists()   # truly nothing started
+
+
+def test_a_failed_run_records_how_it_was_invoked(tmp_path):
+    """A live handoff had to ask whether the harness sets PYTHONPATH — the command line answers that."""
+    _, adapter, wd = build(tmp_path, {"broken": "raise SystemExit('nope')\n"})
+    ladder.enqueue_experiments(adapter, wd, [
+        ExperimentSpec("boom", "crashes", {"VARIANT": "broken"})], "screen")
+    worker(adapter, wd, device="0")
+    result = Registry(wd).all_results()[0]
+    command = (Path(result.run_dir) / "command.txt").read_text()
+    assert "PYTHONPATH" in command and "train.py" in command

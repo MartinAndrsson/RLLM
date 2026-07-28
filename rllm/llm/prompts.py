@@ -115,6 +115,11 @@ def handoff_user(brief, evidence: dict, terminal_reason: str, memory_text: str) 
         "- 'needs_help': progress is blocked on something the harness cannot do (a missing knob, a "
         "code change in the problem repo, a broken runner, a bad reward).\n"
         "- 'stalled': the search has plateaued and repeating it will not help.\n"
+        "- If `blocked_reason` is set or `recent_failures` shows the runs never worked, the session was "
+        "STOPPED because nothing ran — your job is a DIAGNOSIS, not a research plan. Read the errors and "
+        "logs, name the single most likely cause, and put the concrete fix the user should apply in "
+        "`questions_for_human` or `requests_requiring_authority`. Say plainly that there are no results. "
+        "Do not propose next experiments in that case; they cannot run until the setup is fixed.\n"
         "- 'solved' / 'abandon': only with the evidence to justify it.\n"
         "`requests_requiring_authority` is for anything a human must authorize (changing the solved "
         "criterion, relaxing a realism constraint, editing the problem repo, a big compute ask).",
