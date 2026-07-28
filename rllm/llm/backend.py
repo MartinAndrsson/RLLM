@@ -3,20 +3,27 @@
 - `MockBackend`   : deterministic canned responses (for tests / dry-run of the control loop).
 - `CLIBackend`    : shells out to a CLI agent (Claude Code `claude -p`, or `codex exec`) headlessly,
                     feeding the user prompt on stdin and the system prompt via a flag, and reading the
-                    model's text back from stdout. The exact argv is CONFIGURABLE (a template list with
-                    a {system} placeholder) so the same class drives claude or codex, and so flags can
-                    be corrected for your CLI version without touching code.
+                    model's text back from stdout or a last-message file. The exact argv is CONFIGURABLE
+                    (a template list with {system}/{prompt}/{outfile} placeholders) so the same class
+                    drives claude or codex, and so flags can be corrected for your CLI version without
+                    touching code.
 
 Backends return raw text; `parse_json` robustly extracts the JSON object the prompts ask the model for.
-NOTE: real CLI invocation can only be validated on your machine (it needs the logged-in subscription).
-The default flag sets below are starting points — verify against your `claude`/`codex` version.
+
+Both presets below are VERIFIED against claude 2.1.220 / codex-cli 0.145.0 with the logged-in
+subscriptions (no API keys). Both follow implementations.md §7.4 (model execution safety): the prompt
+goes on stdin (not argv, so size is unbounded), and the agents get no ability to act — claude with
+`--tools ""`, codex with `--sandbox read-only --ephemeral`.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 
 class LLMBackend(ABC):
@@ -40,48 +47,77 @@ class MockBackend(LLMBackend):
 
 
 class CLIBackend(LLMBackend):
-    """Drive a headless CLI agent. `argv_template` items may contain '{system}' and '{prompt}',
-    substituted before exec. `text_from`: 'raw' (stdout IS the text) or a JSON field ('result' for the
-    Claude `--output-format json` envelope). If no template item contains '{system}', the system prompt
-    is folded into the prompt (for CLIs without a system-prompt flag, e.g. codex).
+    """Drive a headless CLI agent. `argv_template` items may contain the placeholders:
 
-    Claude preset uses NON-bare mode on purpose -> it authenticates via the logged-in subscription
-    session (no ANTHROPIC_API_KEY needed). `--permission-mode dontAsk` keeps it text/JSON only (no
-    blocking prompts, no actions). Optionally add `--model ...` / `--max-budget-usd ...` to the template."""
+      {system}  -> the system prompt (if absent from the template it is folded into the prompt text,
+                   for CLIs with no system-prompt flag)
+      {prompt}  -> the user prompt (omit it and set stdin_prompt=True to feed the prompt on stdin,
+                   which is what both presets do: argv has a length limit, prompts do not)
+      {outfile} -> a temp file the CLI is told to write its final message to (codex `-o`)
 
-    # Claude Code headless (verified against the docs): text lands in the JSON envelope's "result".
-    CLAUDE = ["claude", "-p", "{prompt}", "--output-format", "json",
-              "--append-system-prompt", "{system}", "--permission-mode", "dontAsk"]
+    `text_from` selects where the answer is read from: 'raw' (stdout IS the text), 'file' (read
+    {outfile}), or a JSON field name ('result' for Claude's `--output-format json` envelope).
+
+    Both presets run in non-bare mode on purpose -> they authenticate via the logged-in subscription
+    session (no ANTHROPIC_API_KEY / OPENAI_API_KEY needed)."""
+
+    # Claude Code headless. Prompt on stdin; answer in the JSON envelope's "result" field.
+    # `--tools ""` disables the entire built-in tool set -> the actor can only emit text (§7.4).
+    CLAUDE = ["claude", "-p", "--output-format", "json", "--append-system-prompt", "{system}", "--tools", ""]
     CLAUDE_TEXT_FROM = "result"
-    # Codex non-interactive; no system flag -> system gets folded into the prompt. Adjust to your codex.
-    CODEX = ["codex", "exec", "{prompt}"]
+    # Codex non-interactive. Trailing "-" = read the prompt from stdin; no system flag, so the system
+    # prompt is folded in. read-only sandbox + --ephemeral (no session files) per §7.4; stdout is an
+    # event log, so the actual answer is read from the -o last-message file.
+    CODEX = ["codex", "exec", "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
+             "--color", "never", "-o", "{outfile}", "-"]
 
-    def __init__(self, name: str, argv_template: list[str], text_from: str = "raw", timeout: float = 300.0):
+    def __init__(self, name: str, argv_template: list[str], text_from: str = "raw",
+                 timeout: float = 600.0, stdin_prompt: bool = False, model: str | None = None):
         self.name = name
         self.argv_template = argv_template
         self.text_from = text_from
         self.timeout = timeout
+        self.stdin_prompt = stdin_prompt
+        self.model = model
 
     def ask(self, system: str, prompt: str) -> str:
-        has_system_slot = any("{system}" in a for a in self.argv_template)
-        if not has_system_slot and system:
+        if not any("{system}" in a for a in self.argv_template) and system:
             prompt = f"[SYSTEM INSTRUCTIONS]\n{system}\n\n[TASK]\n{prompt}"
-        argv = [a.replace("{system}", system).replace("{prompt}", prompt) for a in self.argv_template]
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout)
-        if proc.returncode != 0:
-            raise RuntimeError(f"{self.name} CLI failed ({proc.returncode}): {proc.stderr[:500]}")
-        out = proc.stdout
-        if self.text_from == "raw":
-            return out
-        return str(json.loads(out).get(self.text_from, out))
+
+        outfile = None
+        if any("{outfile}" in a for a in self.argv_template):
+            fd, outfile = tempfile.mkstemp(prefix="rllm_llm_", suffix=".txt")
+            os.close(fd)
+        try:
+            argv = [a.replace("{system}", system).replace("{outfile}", outfile or "")
+                     .replace("{prompt}", "" if self.stdin_prompt else prompt)
+                    for a in self.argv_template]
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout,
+                                  input=prompt if self.stdin_prompt else None,
+                                  stdin=None if self.stdin_prompt else subprocess.DEVNULL)
+            if proc.returncode != 0:
+                raise RuntimeError(f"{self.name} CLI failed ({proc.returncode}): {proc.stderr[:500]}")
+            if self.text_from == "file":
+                return Path(outfile).read_text()
+            if self.text_from == "raw":
+                return proc.stdout
+            return str(json.loads(proc.stdout).get(self.text_from, proc.stdout))
+        finally:
+            if outfile:
+                Path(outfile).unlink(missing_ok=True)
 
     @classmethod
-    def claude(cls, timeout: float = 300.0) -> "CLIBackend":
-        return cls("claude", cls.CLAUDE, text_from=cls.CLAUDE_TEXT_FROM, timeout=timeout)
+    def claude(cls, timeout: float = 600.0, model: str | None = None) -> "CLIBackend":
+        argv = list(cls.CLAUDE) + (["--model", model] if model else [])
+        return cls("claude", argv, text_from=cls.CLAUDE_TEXT_FROM, timeout=timeout,
+                   stdin_prompt=True, model=model)
 
     @classmethod
-    def codex(cls, timeout: float = 300.0) -> "CLIBackend":
-        return cls("codex", cls.CODEX, text_from="raw", timeout=timeout)
+    def codex(cls, timeout: float = 600.0, model: str | None = None) -> "CLIBackend":
+        argv = list(cls.CODEX)
+        if model:  # insert before the trailing "-" (stdin marker)
+            argv = argv[:-1] + ["-m", model, "-"]
+        return cls("codex", argv, text_from="file", timeout=timeout, stdin_prompt=True, model=model)
 
 
 def parse_json(text: str) -> dict:

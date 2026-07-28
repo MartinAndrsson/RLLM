@@ -1,0 +1,13 @@
+{
+  "id": "m1_gamma995",
+  "hypothesis": "Now that the value function is bootstrapped at the horizon, a longer effective horizon (GAMMA=0.995) lets the critic value multi-day stock buffers and reduces shortages.",
+  "config": {
+    "TRUNC": 1,
+    "GAMMA": 0.995,
+    "MAXGEN": 60,
+    "EVAL_EVERY": 30,
+    "BC_EPOCHS": 0
+  },
+  "fidelity": "screen",
+  "parent": null
+}

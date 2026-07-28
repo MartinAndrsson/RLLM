@@ -1,0 +1,1 @@
+bash -c cd /home/hep/maander/Supply/Rx_dan/supply && TRUNC=1 SOFT_SCALE=0 SHORTAGE_SCALE=45000 RFID_PROB=0.1 FORECAST_UNC=0.02 SELECT_METRIC=shortage_days PLOT_EXTRA=0 EVAL_EPISODES=3 TD_N_STEPS=3 MAXGEN=60 EVAL_EVERY=30 BC_EPOCHS=0 CUDA_VISIBLE_DEVICES=0 SEED=1 PREFIX=rllm_m1_nstep3__seed1 PY=/home/hep/maander/miniconda3/envs/psim/bin/python bash run_tqc_deep.sh

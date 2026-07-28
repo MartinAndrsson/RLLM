@@ -21,6 +21,42 @@ with its result. Mirrors the essentials of the Rx repo's `RL.md` (source of trut
 - Training step is ~3/4 env-collection, ~1/4 gradients -> speed lever is n_envs (192 cores, using 16),
   not UTD. Device: GPU only ~1.3x over CPU (tiny net); avoid the flaky GPU index.
 
+## How to run this problem now (2026-07-28)
+`brief.json` in this directory is the frozen contract: primary metric `success_fraction` (maximize),
+solved = `success_fraction >= 1.0 and mean_shortage_days <= 0` at `confirm` over >=3 seeds, 8h window,
+60-run cap, and `RFID_PROB`/`FORECAST_UNC`/`SCENARIO_POOL`/`DR_CONFIG` forbidden. One bounded session:
+
+```bash
+cd /home/hep/maander/Supply/RLLM
+python -m rllm.cli solve adapters/rx/rllm_work --device 0 --until 8h
+python -m rllm.cli handoff adapters/rx/rllm_work
+```
+It plans/runs/promotes waves until wind-down, then writes `sessions/<id>/handoff.md` and appends a
+facts-only block here. Edit brief.json to change the window, the caps or the solved bar — the models may
+request those changes in a handoff but cannot make them.
+
+## RLLM wave 1 (2026-07-28) — first LLM-proposed wave, ENQUEUED, not yet run
+Actor claude / reviewer codex, via `python -m rllm.cli propose adapters/rx/rllm_work`. Queued at
+`screen` (MAXGEN=60, 1 seed, BC_EPOCHS=0) on top of the M1 base. Nothing has trained yet — run
+`python -m rllm.cli work adapters/rx/rllm_work --device 0` to execute.
+
+| id | delta vs M1 base | hypothesis (actor) | status |
+|----|------------------|--------------------|--------|
+| m1_nstep3 | `TD_N_STEPS=3` | n-step returns propagate the delayed shortage signal faster than 1-step TD | queued |
+| m1_send_cap50 | `MAX_SEND_FRAC=0.5` | capping per-route daily drain prevents the over-draining behind the last ~1 shortage day | queued |
+| m1_gamma995 | `GAMMA=0.995` | post-bootstrap, a longer effective horizon lets the critic value multi-day buffers | queued |
+
+Reviewer (codex) rejected a 4th, `SELECT_METRIC=shortage_days` — correctly, since the M1 base already
+sets it (it would have been a duplicate of the base). Its risk flags to carry forward: `proxy_transfer`
+/ `short_screen_may_misrank`, `insufficient_seeds`, `late_convergence`, `normal_ops_only`, and
+`send_cap_may_reduce_action_feasibility` (check MAX_SEND_FRAC=0.5 doesn't make demand unservable).
+
+Harness lessons from this first live wave (both now fixed + regression-tested):
+- The reviewer initially blocked the whole wave demanding more generations/seeds — knobs the actor
+  structurally cannot set. Both prompts now state the fidelity ladder as harness-owned and off-limits.
+- Neither model saw the base recipe, so all four proposals re-stated `TRUNC=1` and one duplicated the
+  base. Both prompts now include the base config and ask for deltas only.
+
 ## Idea backlog (untried, prioritised) — pull these into screen experiments
 - [high] Recurrent policy (POMDP from RFID 0.1) — integrate history to infer true stock.
 - [high] n-step returns (`--td-n-steps 2/3`, in-framework) — faster propagation of the delayed signal.

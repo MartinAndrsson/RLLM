@@ -1,0 +1,13 @@
+{
+  "id": "m1_send_cap50",
+  "hypothesis": "Capping per-route outbound at MAX_SEND_FRAC=0.5 prevents over-draining a hub in a single day, removing a common cause of the remaining ~1 shortage day.",
+  "config": {
+    "TRUNC": 1,
+    "MAX_SEND_FRAC": 0.5,
+    "MAXGEN": 60,
+    "EVAL_EVERY": 30,
+    "BC_EPOCHS": 0
+  },
+  "fidelity": "screen",
+  "parent": null
+}

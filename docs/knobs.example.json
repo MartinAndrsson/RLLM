@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "Knob declarations for the generic brief-driven adapter. This list IS the whitelist: the models may",
+    "only set knobs that appear here, with values inside the declared type/range/choices. Anything else",
+    "is rejected before a command is built, so an incomplete list is safe (just limiting).",
+    "",
+    "Each knob is exported as an environment variable of that name to your test_command.",
+    "",
+    "  value_type      int | float | bool | string | enum",
+    "  category        algorithm | hyperparameter | reward | observation | action |",
+    "                  training_budget | evaluation | task_definition",
+    "  fidelity_safe   may a fidelity rung set it? (only cost knobs: it must not change the problem)",
+    "  llm_may_change  may the actor propose it? false = harness/human only",
+    "",
+    "Mark anything that changes what 'solved' means as category 'task_definition': those stay gated",
+    "behind the brief's permitted_task_changes even when both models agree. Prefer 'enum' with explicit",
+    "choices over free-form 'string' — a string reaches a shell command line.",
+    "Delete this _comment key before use."
+  ],
+  "knobs": [
+    {
+      "name": "LR",
+      "value_type": "float",
+      "default": 0.0003,
+      "category": "hyperparameter",
+      "minimum": 1e-06,
+      "maximum": 0.01
+    },
+    {
+      "name": "BATCH",
+      "value_type": "int",
+      "default": 256,
+      "category": "hyperparameter",
+      "minimum": 32,
+      "maximum": 4096
+    },
+    {
+      "name": "GAMMA",
+      "value_type": "float",
+      "default": 0.99,
+      "category": "hyperparameter",
+      "minimum": 0.5,
+      "maximum": 0.9999
+    },
+    {
+      "name": "ALGO",
+      "value_type": "enum",
+      "default": "sac",
+      "category": "algorithm",
+      "choices": ["sac", "tqc", "ppo"]
+    },
+    {
+      "name": "REWARD_PENALTY",
+      "value_type": "float",
+      "default": 1.0,
+      "category": "reward",
+      "minimum": 0.0,
+      "maximum": 1000.0
+    },
+    {
+      "name": "TRAIN_STEPS",
+      "value_type": "int",
+      "default": 200000,
+      "category": "training_budget",
+      "minimum": 1000,
+      "maximum": 10000000,
+      "fidelity_safe": true,
+      "llm_may_change": false
+    },
+    {
+      "name": "EPISODE_LENGTH",
+      "value_type": "int",
+      "default": 100,
+      "category": "task_definition",
+      "minimum": 10,
+      "maximum": 1000,
+      "llm_may_change": false
+    }
+  ],
+  "fidelities": [
+    {"name": "screen",  "overrides": {"TRAIN_STEPS": 20000},  "seeds": [1],       "cost_multiplier": 1.0},
+    {"name": "refine",  "overrides": {"TRAIN_STEPS": 100000}, "seeds": [1, 2],    "cost_multiplier": 5.0},
+    {"name": "confirm", "overrides": {"TRAIN_STEPS": 200000}, "seeds": [1, 2, 3], "cost_multiplier": 10.0}
+  ],
+  "base_config": {},
+  "cheap_run_seconds": 1800
+}

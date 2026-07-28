@@ -1,0 +1,13 @@
+{
+  "id": "m1_nstep3",
+  "hypothesis": "n-step returns (TD_N_STEPS=3) propagate the delayed shortage/survival signal faster than 1-step TD, raising Normal-ops success over M1 at equal budget.",
+  "config": {
+    "TRUNC": 1,
+    "TD_N_STEPS": 3,
+    "MAXGEN": 60,
+    "EVAL_EVERY": 30,
+    "BC_EPOCHS": 0
+  },
+  "fidelity": "screen",
+  "parent": null
+}
