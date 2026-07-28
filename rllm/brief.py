@@ -80,6 +80,10 @@ class SessionBudget:
     maximum_runs: int = 200
     maximum_concurrent_runs: int = 1
     maximum_llm_calls: int = 200
+    # Subscription limits are token-based, so a call cap alone does not protect them: keep these set to
+    # what one session may spend of your allowance. None = bounded only by the call cap.
+    maximum_llm_tokens: int | None = 2_000_000
+    maximum_llm_cost_usd: float | None = None
     maximum_actor_reviewer_revisions: int = 2
     maximum_retry_runs: int = 2
     per_run_timeout_seconds: float | None = None  # None = derived from the fidelity estimate
@@ -170,6 +174,10 @@ class ProblemBrief:
         for name in ("maximum_runs", "maximum_llm_calls", "maximum_concurrent_runs"):
             if getattr(b, name) < 1:
                 errs.append(f"session_budget.{name} must be >= 1")
+        for name in ("maximum_llm_tokens", "maximum_llm_cost_usd"):
+            value = getattr(b, name)
+            if value is not None and value <= 0:
+                errs.append(f"session_budget.{name} must be > 0 or null")
         overlap = set(self.permitted_task_changes) & set(self.forbidden_task_changes)
         if overlap:
             errs.append(f"knob(s) both permitted and forbidden: {sorted(overlap)}")

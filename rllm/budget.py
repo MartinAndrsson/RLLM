@@ -12,6 +12,7 @@ from statistics import median
 
 from .brief import SessionBudget
 from .interfaces import ProblemAdapter, RunResult
+from .llm.backend import Usage
 from .registry import Registry
 
 STARTUP_OVERHEAD_SECONDS = 120.0     # env setup, imports, checkpoint IO before real work begins
@@ -25,6 +26,11 @@ class Ledger:
     runs_launched: int = 0
     runs_failed: int = 0
     llm_calls: int = 0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    llm_cache_read_tokens: int = 0
+    llm_cost_usd: float = 0.0
+    llm_cost_known: bool = True
     run_seconds: float = 0.0
     waves: int = 0
     stopped_because: list[str] = field(default_factory=list)
@@ -44,8 +50,22 @@ class Ledger:
         if result.status != "done":
             self.runs_failed += 1
 
+    @property
+    def llm_tokens(self) -> int:
+        return self.llm_input_tokens + self.llm_output_tokens
+
     def record_llm_calls(self, n: int = 1) -> None:
         self.llm_calls += n
+
+    def record_usage(self, usage: Usage) -> None:
+        """Fold in what a backend actually reported. Tokens come from the CLI itself, so this is measured
+        spend rather than an estimate — which is the only kind worth enforcing a limit on."""
+        self.llm_calls += usage.calls
+        self.llm_input_tokens += usage.input_tokens
+        self.llm_output_tokens += usage.output_tokens
+        self.llm_cache_read_tokens += usage.cache_read_tokens
+        self.llm_cost_usd += usage.cost_usd
+        self.llm_cost_known = self.llm_cost_known and usage.cost_known
 
     # ---------------- limits (deterministic; no model input) ----------------
 
@@ -57,6 +77,11 @@ class Ledger:
             return f"LLM-call cap reached ({self.llm_calls}/{budget.maximum_llm_calls})"
         if budget.maximum_gpu_hours is not None and self.gpu_hours >= budget.maximum_gpu_hours:
             return f"compute cap reached (~{self.gpu_hours:.1f}/{budget.maximum_gpu_hours:.1f} GPU-h)"
+        if budget.maximum_llm_tokens is not None and self.llm_tokens >= budget.maximum_llm_tokens:
+            return (f"LLM token cap reached ({self.llm_tokens:,}/{budget.maximum_llm_tokens:,}) — "
+                    f"protects the subscription allowance")
+        if budget.maximum_llm_cost_usd is not None and self.llm_cost_usd >= budget.maximum_llm_cost_usd:
+            return f"LLM spend cap reached (${self.llm_cost_usd:.2f}/${budget.maximum_llm_cost_usd:.2f})"
         return None
 
     def runs_remaining(self, budget: SessionBudget) -> int:

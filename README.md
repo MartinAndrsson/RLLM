@@ -96,8 +96,17 @@ change what "solved" means) stay human-gated even when both models agree. The re
 shrink the approved set; an absent or empty approval list approves nothing.
 
 The session's limits are enforced the same way — outside the models. The deadline, the run cap and the
-LLM-call cap live in `rllm/session.py` and `rllm/budget.py`; a model can only *request* more time, in
-the handoff. Runs are launched in their own process group with a hard timeout, so nothing outlives the
+LLM call/token/spend caps live in `rllm/session.py` and `rllm/budget.py`; a model can only *request* more,
+in the handoff. Token and cost accounting is **measured, not estimated**: `claude -p --output-format json`
+returns usage and price in the same envelope as the answer, and codex reports a token count, so
+`maximum_llm_tokens` / `maximum_llm_cost_usd` in the brief protect the subscription allowance directly.
+Headroom is reserved on every axis so the handoff always gets written. Where a backend reports no price
+(codex), the spend is labelled a lower bound rather than silently treated as free.
+
+**Model tiering** (default on): screening proposals run on the cheap tier, while review and the handoff
+write-up stay on the strongest model — a proposal is a short structured object that a strong reviewer then
+attacks, so that is where the cheap tier is safe. It is a policy, not the model's own judgement; override
+with `--propose-model` or turn it off with `--same-tier`. Runs are launched in their own process group with a hard timeout, so nothing outlives the
 window. "Solved" is only ever claimed from the brief's required fidelity over its required seed count;
 everything cheaper is reported as an unconfirmed lead.
 

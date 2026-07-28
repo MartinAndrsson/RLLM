@@ -31,7 +31,7 @@ from .budget import STARTUP_OVERHEAD_SECONDS, Estimator, Ledger
 from .dispatcher import Queue, worker
 from .interfaces import ProblemAdapter
 from .llm import controller as llm_controller
-from .llm.backend import LLMBackend
+from .llm.backend import LLMBackend, Usage
 from .registry import Registry
 
 STATES = ("initializing", "planning", "executing", "evaluating", "confirming", "winding_down")
@@ -82,9 +82,15 @@ class Session:
     def __init__(self, adapter: ProblemAdapter, brief: ProblemBrief, work_dir, device: str = "0",
                  actor: LLMBackend | None = None, reviewer: LLMBackend | None = None,
                  session_id: str | None = None, log: Callable[[str], None] = print,
-                 cheap_run_seconds: float | None = None, startup_overhead: float | None = None):
+                 cheap_run_seconds: float | None = None, startup_overhead: float | None = None,
+                 handoff_actor: LLMBackend | None = None, handoff_reviewer: LLMBackend | None = None):
         self.adapter, self.brief, self.work_dir, self.device = adapter, brief, work_dir, device
         self.actor, self.reviewer = actor, reviewer
+        # Model tiering: `actor` proposes (cheap tier is fine — short structured output, then adversarially
+        # reviewed), while review and the handoff write-up stay on the strong tier. Falls back to the same
+        # backend when no separate one is given, so untiered use is unchanged.
+        self.handoff_actor = handoff_actor or actor
+        self.handoff_reviewer = handoff_reviewer or reviewer
         self.log = log
         self.budget = brief.session_budget
         self.registry, self.queue = Registry(work_dir), Queue(work_dir)
@@ -98,6 +104,32 @@ class Session:
         self.state = self._load_or_new(session_id)
         self.ledger = Ledger(**self.state.ledger)
         self.rungs = [f.name for f in adapter.fidelity_levels()]
+
+    def _backends(self) -> list[LLMBackend]:
+        seen, out = set(), []
+        for backend in (self.actor, self.reviewer, self.handoff_actor, self.handoff_reviewer):
+            if backend is not None and id(backend) not in seen:
+                seen.add(id(backend))
+                out.append(backend)
+        return out
+
+    def _spent(self) -> Usage:
+        total = Usage()
+        for backend in self._backends():
+            total.add(backend.usage)
+        return total
+
+    def _account(self, before: Usage) -> None:
+        """Fold the tokens/cost of the calls just made into the ledger. Measured from what the CLIs
+        report, so the cap that protects the subscription is enforced on real spend."""
+        after = self._spent()
+        delta = Usage(calls=after.calls - before.calls,
+                      input_tokens=after.input_tokens - before.input_tokens,
+                      output_tokens=after.output_tokens - before.output_tokens,
+                      cache_read_tokens=after.cache_read_tokens - before.cache_read_tokens,
+                      cost_usd=after.cost_usd - before.cost_usd,
+                      cost_known=after.cost_known)
+        self.ledger.record_usage(delta)
 
     # ---------------- persistence ----------------
 
@@ -312,18 +344,19 @@ class Session:
         # Keep calls back for the handoff. The write-up is the single most useful model call of the
         # session, and a run that spends its last call on one more screening wave hands the user a
         # deterministic stub instead of an explanation (seen live).
-        budget_for_proposals = self.budget.maximum_llm_calls - HANDOFF_LLM_RESERVE
-        if self.ledger.llm_calls + CALLS_PER_PROPOSAL > budget_for_proposals:
-            note = (f"stopped proposing at {self.ledger.llm_calls}/{self.budget.maximum_llm_calls} LLM "
-                    f"calls, keeping {HANDOFF_LLM_RESERVE} back for the handoff")
+        note = self._llm_headroom()
+        if note:
             if note not in self.ledger.stopped_because:
                 self.ledger.stopped_because.append(note)
             return []
-        res = llm_controller.propose_and_review(
-            self.actor, self.reviewer, self.adapter, self.work_dir, n=n,
-            max_revisions=self.budget.maximum_actor_reviewer_revisions,
-            permitted_task_changes=tuple(self.brief.permitted_task_changes))
-        self.ledger.record_llm_calls(2 * (1 + res.get("revisions", 0)))
+        before = self._spent()
+        try:
+            res = llm_controller.propose_and_review(
+                self.actor, self.reviewer, self.adapter, self.work_dir, n=n,
+                max_revisions=self.budget.maximum_actor_reviewer_revisions,
+                permitted_task_changes=tuple(self.brief.permitted_task_changes))
+        finally:
+            self._account(before)
         if res.get("action") != "enqueued" or not res.get("ids"):
             # Nothing new was authorized (blocked, or every idea was a duplicate). Record the attempt
             # for the audit trail, but return no plan so the wave can still escalate instead of running
@@ -335,6 +368,31 @@ class Session:
             return []
         return [{"action": "propose", "fidelity": cheapest, "ids": res["ids"],
                  "jobs": res.get("jobs", 0), "explored": True}]
+
+    def _llm_headroom(self) -> str | None:
+        """Why another proposal must not be made, or None. Reserves headroom for the handoff on every
+        axis: a session that spends its last tokens on one more screening wave hands back a stub.
+
+        The token reserve is estimated from what proposals have actually cost this session, because a
+        handoff prompt is about as large as a proposal prompt (both carry the memory and the registry)."""
+        budget = self.budget
+        if self.ledger.llm_calls + CALLS_PER_PROPOSAL > budget.maximum_llm_calls - HANDOFF_LLM_RESERVE:
+            return (f"stopped proposing at {self.ledger.llm_calls}/{budget.maximum_llm_calls} LLM calls, "
+                    f"keeping {HANDOFF_LLM_RESERVE} back for the handoff")
+        per_call = (self.ledger.llm_tokens / self.ledger.llm_calls) if self.ledger.llm_calls else 0.0
+        if budget.maximum_llm_tokens is not None and per_call:
+            need = per_call * (CALLS_PER_PROPOSAL + HANDOFF_LLM_RESERVE)
+            if self.ledger.llm_tokens + need > budget.maximum_llm_tokens:
+                return (f"stopped proposing at {self.ledger.llm_tokens:,}/"
+                        f"{budget.maximum_llm_tokens:,} tokens, keeping enough for the handoff "
+                        f"(~{per_call:,.0f} tokens/call)")
+        per_cost = (self.ledger.llm_cost_usd / self.ledger.llm_calls) if self.ledger.llm_calls else 0.0
+        if budget.maximum_llm_cost_usd is not None and per_cost:
+            need = per_cost * (CALLS_PER_PROPOSAL + HANDOFF_LLM_RESERVE)
+            if self.ledger.llm_cost_usd + need > budget.maximum_llm_cost_usd:
+                return (f"stopped proposing at ${self.ledger.llm_cost_usd:.2f}/"
+                        f"${budget.maximum_llm_cost_usd:.2f}, keeping enough for the handoff")
+        return None
 
     def _promotable(self, lower: str, upper: str) -> list[str]:
         """Experiments completed at `lower` whose promotion to `upper` has not been registered yet."""
@@ -426,26 +484,29 @@ class Session:
         purely advisory: it cannot extend the session. Falls back to a deterministic recommendation when
         no backend is available or the models fail."""
         fallback = _deterministic_recommendation(self, reason)
-        if not (self.actor and self.reviewer):
+        actor, reviewer = self.handoff_actor, self.handoff_reviewer
+        if not (actor and reviewer):
             return fallback
         if self.ledger.llm_calls + 2 > self.budget.maximum_llm_calls:
             fallback["note"] = "LLM-call cap reached before the continuation question could be asked"
             return fallback
+        before = self._spent()
         try:
             from .llm import prompts
             from .llm.backend import parse_json
             evidence = report_evidence(self)
-            raw = self.actor.ask(prompts.HANDOFF_SYSTEM,
-                                 prompts.handoff_user(self.brief, evidence, reason,
-                                                      llm_controller.load_memory(self.work_dir)))
+            raw = actor.ask(prompts.HANDOFF_SYSTEM,
+                            prompts.handoff_user(self.brief, evidence, reason,
+                                                 llm_controller.load_memory(self.work_dir)))
             rec = parse_json(raw)
-            crit = parse_json(self.reviewer.ask(prompts.HANDOFF_REVIEW_SYSTEM,
-                                               prompts.handoff_review_user(rec, evidence, reason)))
-            self.ledger.record_llm_calls(2)
+            crit = parse_json(reviewer.ask(prompts.HANDOFF_REVIEW_SYSTEM,
+                                           prompts.handoff_review_user(rec, evidence, reason)))
+            self._account(before)
             rec = _clean_recommendation(rec)
             rec["reviewer_verdict"] = str(crit.get("verdict", "")).lower()
             rec["reviewer_notes"] = crit.get("reasons") or []
-            rec["source"] = f"actor={self.actor.name}, reviewer={self.reviewer.name}"
+            rec["source"] = (f"actor={actor.name}({actor.model or 'default'}), "
+                             f"reviewer={reviewer.name}({reviewer.model or 'default'})")
             rec["deterministic_view"] = fallback["recommendation"]
             llm_controller._log(self.work_dir, {"stage": "handoff", "session": self.state.session_id,
                                                "terminal_reason": reason, "recommendation": rec,
@@ -453,6 +514,7 @@ class Session:
                                                "method_sha": prompts.method_sha()})
             return rec
         except Exception as exc:                                    # noqa: BLE001
+            self._account(before)
             fallback["note"] = f"models could not be consulted: {exc}"
             return fallback
 
@@ -530,6 +592,10 @@ def report_evidence(session: "Session") -> dict[str, Any]:
         "runs_failed": session.ledger.runs_failed,
         "approx_gpu_hours": round(session.ledger.gpu_hours, 2),
         "llm_calls": session.ledger.llm_calls,
+        "llm_tokens": session.ledger.llm_tokens,
+        "llm_cost_usd": (round(session.ledger.llm_cost_usd, 4)
+                         if session.ledger.llm_cost_known else "partly unreported"),
+        "llm_token_cap": session.budget.maximum_llm_tokens,
         "run_cap": session.budget.maximum_runs,
         "explored_for": format_duration(session.budget.explore_seconds),
         "observed_run_seconds": {fid: round(session.estimator.seconds(fid))

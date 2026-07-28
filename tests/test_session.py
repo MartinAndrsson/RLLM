@@ -532,3 +532,131 @@ def test_run_budget_is_reserved_for_promotions(tmp_path):
 def test_the_reserve_scales_with_the_ladder(tmp_path):
     session = session_for(tmp_path)
     assert session._promotion_reserve() == 5          # refine's 2 seeds + confirm's 3
+
+
+# ---------------------------------------------------------------- subscription usage
+
+def usage(**kw):
+    from rllm.llm.backend import Usage
+    return Usage(**{"calls": 1, **kw})
+
+
+def test_token_usage_is_measured_from_what_the_backends_report(tmp_path):
+    session = session_for(tmp_path, actor=proposals(0.4, 0.5, 0.6), reviewer=approver("x04", "x05", "x06"))
+    session.actor._per_call = usage(input_tokens=5000, output_tokens=500, cost_usd=0.10)
+    session.reviewer._per_call = usage(input_tokens=7000, output_tokens=300, cost_usd=0.20)
+    session.run()
+    led = session.ledger
+    # Exactly what the backends reported for the calls actually made — no estimation anywhere.
+    assert led.llm_input_tokens == 5000 * len(session.actor.calls) + 7000 * len(session.reviewer.calls)
+    assert led.llm_output_tokens == 500 * len(session.actor.calls) + 300 * len(session.reviewer.calls)
+    assert led.llm_calls == len(session.actor.calls) + len(session.reviewer.calls)
+    assert led.llm_cost_usd == pytest.approx(
+        0.10 * len(session.actor.calls) + 0.20 * len(session.reviewer.calls))
+    assert led.llm_cost_known is True
+
+
+def test_cache_reads_are_tracked_but_not_charged_against_the_cap(tmp_path):
+    """A well-cached session must not look like a runaway one: the journal is re-sent every call."""
+    session = session_for(tmp_path, actor=proposals(0.4), reviewer=approver("x04"))
+    session.actor._per_call = usage(input_tokens=100, output_tokens=10, cache_read_tokens=500_000)
+    session.reviewer._per_call = usage(input_tokens=100, output_tokens=10, cache_read_tokens=500_000)
+    session.run()
+    assert session.ledger.llm_cache_read_tokens >= 1_000_000
+    assert session.ledger.llm_tokens < 10_000            # the cap sees only real input/output
+
+
+def test_the_token_cap_stops_the_session(tmp_path):
+    session = session_for(tmp_path, actor=proposals(0.2, 0.3, 0.4, 0.5, 0.6),
+                          reviewer=approver("x02", "x03", "x04", "x05", "x06"),
+                          maximum_llm_tokens=60_000)
+    session.actor._per_call = usage(input_tokens=10_000, output_tokens=1_000)
+    session.reviewer._per_call = usage(input_tokens=10_000, output_tokens=1_000)
+    state = session.run()
+    assert session.ledger.llm_tokens <= 60_000 * 1.5     # bounded, not unbounded
+    assert any("token" in note for note in session.ledger.stopped_because) \
+        or state.terminal_reason == "budget_exhausted"
+    assert (session.dir / "handoff.md").exists()
+
+
+def test_tokens_are_reserved_for_the_handoff(tmp_path):
+    """The same reserve logic as the call cap, on the token axis: the write-up must still happen."""
+    session = session_for(tmp_path, actor=proposals(0.2, 0.3, 0.4),
+                          reviewer=approver("x02", "x03", "x04"), maximum_llm_tokens=100_000)
+    session.actor._per_call = usage(input_tokens=10_000, output_tokens=1_000)
+    session.reviewer._per_call = usage(input_tokens=10_000, output_tokens=1_000)
+    session.run()
+    assert session.state.recommendation["source"] != "deterministic"   # the handoff was asked
+
+
+def test_a_cost_cap_also_stops_proposing(tmp_path):
+    session = session_for(tmp_path, actor=proposals(0.2, 0.3, 0.4, 0.5),
+                          reviewer=approver("x02", "x03", "x04", "x05"),
+                          maximum_llm_tokens=None, maximum_llm_cost_usd=1.0)
+    session.actor._per_call = usage(input_tokens=100, cost_usd=0.20)
+    session.reviewer._per_call = usage(input_tokens=100, cost_usd=0.20)
+    session.run()
+    assert session.ledger.llm_cost_usd <= 1.5
+    assert any("$" in note for note in session.ledger.stopped_because) \
+        or session.state.terminal_reason == "budget_exhausted"
+
+
+def test_unreported_cost_is_flagged_not_treated_as_free(tmp_path):
+    """Codex reports tokens but no price; a spend figure must not look authoritative when it is partial."""
+    session = session_for(tmp_path, actor=proposals(0.4), reviewer=approver("x04"))
+    session.reviewer._per_call = usage(input_tokens=1000, cost_known=False)
+    session.run()
+    assert session.ledger.llm_cost_known is False
+    assert "unreported" in (session.dir / "handoff.md").read_text()
+
+
+def test_the_handoff_reports_the_spend(tmp_path):
+    session = session_for(tmp_path, actor=proposals(0.4), reviewer=approver("x04"))
+    session.run()
+    text = (session.dir / "handoff.md").read_text()
+    assert "LLM tokens:" in text and "cached reads" in text
+
+
+# ---------------------------------------------------------------- model tiering
+
+def test_proposals_use_the_cheap_tier_and_the_handoff_the_strong_one(tmp_path):
+    from rllm.llm.backend import CLIBackend
+    from rllm import cli
+    class A:                                     # stand-in for parsed argv
+        no_llm = False; actor = "claude"; reviewer = "codex"; actor_model = None
+        reviewer_model = None; propose_model = None; same_tier = False; timeout = 60.0
+        allow_same_model_review = False
+    propose, review, handoff_actor, handoff_review = cli._backends(A())
+    assert propose.model == CLIBackend.CHEAP_CLAUDE      # screening: cheap
+    assert handoff_actor.model is None                   # handoff: CLI default (strongest)
+    assert review.model is None and handoff_review.model is None
+
+
+def test_same_tier_disables_tiering(tmp_path):
+    from rllm import cli
+    class A:
+        no_llm = False; actor = "claude"; reviewer = "codex"; actor_model = None
+        reviewer_model = None; propose_model = None; same_tier = True; timeout = 60.0
+        allow_same_model_review = False
+    propose, _, handoff_actor, _ = cli._backends(A())
+    assert propose.model is None and handoff_actor.model is None
+
+
+def test_an_explicit_propose_model_wins(tmp_path):
+    from rllm import cli
+    class A:
+        no_llm = False; actor = "claude"; reviewer = "codex"; actor_model = None
+        reviewer_model = None; propose_model = "claude-haiku-4-5"; same_tier = False; timeout = 60.0
+        allow_same_model_review = False
+    propose, _, _, _ = cli._backends(A())
+    assert propose.model == "claude-haiku-4-5"
+
+
+def test_the_handoff_records_which_model_wrote_it(tmp_path):
+    session = session_for(tmp_path, actor=proposals(0.4), reviewer=approver("x04"))
+    session.handoff_actor = MockBackend([json.dumps(
+        {"recommendation": "more_time", "confidence": "low", "reasoning": "needs longer"})] * 3)
+    session.handoff_reviewer = MockBackend([json.dumps({"verdict": "approve"})] * 3)
+    session.run()
+    assert session.state.recommendation["recommendation"] == "more_time"
+    assert "actor=mock" in session.state.recommendation["source"]

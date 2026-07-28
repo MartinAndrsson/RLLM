@@ -52,23 +52,38 @@ def _resolve(work_dir, require_brief: bool = False):
 
 
 def _backends(args):
-    """(actor, reviewer) or (None, None) with --no-llm. Different backends are required by default."""
+    """The four role-backends: (propose_actor, reviewer, handoff_actor, handoff_reviewer).
+
+    Model tiering (default on): the PROPOSING actor runs on the cheap tier, because a proposal is a short
+    structured object that a strong reviewer then attacks; review and the handoff write-up — where the
+    judgement actually is — stay on the default (strongest) model. `--same-tier` disables it.
+    """
     if getattr(args, "no_llm", False):
-        return None, None
+        return None, None, None, None
     from rllm.llm.backend import CLIBackend
     if args.actor == args.reviewer and not args.allow_same_model_review:
         raise SystemExit("actor and reviewer must be different backends (pass "
                          "--allow-same-model-review to override; independent review is the point)")
     mk = {"claude": CLIBackend.claude, "codex": CLIBackend.codex}
-    return (mk[args.actor](timeout=args.timeout, model=args.actor_model),
+    cheap = {"claude": CLIBackend.CHEAP_CLAUDE}.get(args.actor)
+    propose_model = args.propose_model or (None if getattr(args, "same_tier", False) else cheap)
+    strong_model = args.actor_model
+    return (mk[args.actor](timeout=args.timeout, model=propose_model),
+            mk[args.reviewer](timeout=args.timeout, model=args.reviewer_model),
+            mk[args.actor](timeout=args.timeout, model=strong_model),
             mk[args.reviewer](timeout=args.timeout, model=args.reviewer_model))
 
 
 def _add_llm_flags(p):
     p.add_argument("--actor", default="claude", choices=["claude", "codex"])
     p.add_argument("--reviewer", default="codex", choices=["claude", "codex"])
-    p.add_argument("--actor-model", default=None)
+    p.add_argument("--actor-model", default=None,
+                   help="model for the strong-tier actor calls (the handoff); default = CLI default")
     p.add_argument("--reviewer-model", default=None)
+    p.add_argument("--propose-model", default=None,
+                   help="model for screening proposals; default = the cheap tier")
+    p.add_argument("--same-tier", action="store_true",
+                   help="disable model tiering: propose on the same model as review/handoff")
     p.add_argument("--timeout", type=float, default=900.0)
     p.add_argument("--allow-same-model-review", action="store_true")
 
@@ -138,7 +153,7 @@ def main(argv=None):
     elif args.cmd == "propose":
         brief, adapter = _resolve(args.work_dir)
         from rllm.llm import controller
-        actor, reviewer = _backends(args)
+        actor, reviewer, _, _ = _backends(args)
         res = controller.propose_and_review(
             actor, reviewer, adapter, args.work_dir, n=args.n,
             permitted_task_changes=tuple(brief.permitted_task_changes) if brief else ())
@@ -213,13 +228,26 @@ def _solve(args):
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
         raise SystemExit(2)
-    actor, reviewer = _backends(args)
+    actor, reviewer, handoff_actor, handoff_reviewer = _backends(args)
+    if actor is not None:
+        print(f"models: propose={actor.name}({actor.model or 'default'}) "
+              f"review={reviewer.name}({reviewer.model or 'default'}) "
+              f"handoff={handoff_actor.name}({handoff_actor.model or 'default'})")
     session = Session(adapter, brief, args.work_dir, device=args.device, actor=actor,
-                      reviewer=reviewer, session_id=args.resume)
+                      reviewer=reviewer, handoff_actor=handoff_actor,
+                      handoff_reviewer=handoff_reviewer, session_id=args.resume)
     state = session.run()
     rec = state.recommendation or {}
     print()
     print(f"session {state.session_id} ended: {state.terminal_reason}")
+    led = state.ledger
+    cost = (f", ${led['llm_cost_usd']:.2f}" if led.get("llm_cost_known") else ", cost partly unreported")
+    print(f"LLM spend: {led['llm_calls']} calls, "
+          f"{led['llm_input_tokens'] + led['llm_output_tokens']:,} tokens"
+          f"{cost} (cap {brief.session_budget.maximum_llm_tokens:,} tokens)"
+          if brief.session_budget.maximum_llm_tokens else
+          f"LLM spend: {led['llm_calls']} calls, "
+          f"{led['llm_input_tokens'] + led['llm_output_tokens']:,} tokens{cost}")
     print(f"recommendation: {rec.get('recommendation', 'none')} "
           f"({rec.get('confidence', 'unknown')} confidence, {rec.get('source', 'n/a')})")
     if rec.get("reasoning"):

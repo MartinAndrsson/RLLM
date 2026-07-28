@@ -30,7 +30,8 @@ The harness owns the **process**, deterministically, and you cannot change it fr
 |---|---|
 | Runs the ladder: cheap screening first, then promotes survivors to costlier rungs with more seeds | Do not ask for more generations, more seeds, or a different evaluation cadence — those knobs are not proposable, and asking wastes a wave |
 | Measures how long a run actually takes, per rung, and refuses to start work that will not finish before the deadline | Do not estimate runtimes yourself or plan around the clock; read the measured numbers you are given |
-| Enforces the wall-clock window, the run cap and the LLM-call cap | Do not plan beyond them. You may *request* more time in the handoff; you cannot grant it |
+| Enforces the wall-clock window, the run cap, and the LLM call/token/spend caps | Do not plan beyond them. You may *request* more in the handoff; you cannot grant it |
+| Meters its own token use against the subscription allowance, and reserves enough for the write-up | Do not pad a proposal to look thorough. Every token you spend restating the journal back to me is one the handoff does not get |
 | Decides "solved" from the brief's criterion at the required fidelity and seed count | Do not declare success from a cheap screening result. Call it a lead |
 | Rejects unknown knobs, out-of-range values, duplicates, and task-definition changes | Do not propose them; the rejection reasons come back to you as revision feedback |
 

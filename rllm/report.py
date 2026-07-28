@@ -183,6 +183,13 @@ def _render(session, terminal_reason: str, evidence: dict) -> str:
     add(f"- run wall-clock: **{format_duration(led.run_seconds)}** (~{led.gpu_hours:.2f} device-hours; "
         f"ESTIMATE — one run per device, not measured utilisation)")
     add(f"- LLM calls: **{led.llm_calls}** of a {brief.session_budget.maximum_llm_calls} cap")
+    cap = brief.session_budget.maximum_llm_tokens
+    add(f"- LLM tokens: **{led.llm_tokens:,}**"
+        + (f" of a {cap:,} cap" if cap else " (no token cap set)")
+        + f" (+{led.llm_cache_read_tokens:,} cached reads, not counted against the cap)")
+    add(f"- LLM spend: **${led.llm_cost_usd:.2f}**" if led.llm_cost_known else
+        f"- LLM spend: **${led.llm_cost_usd:.2f} plus an unreported amount** (one backend reports tokens "
+        f"but no price, so this is a lower bound)")
     for note in led.stopped_because:
         add(f"- limit hit: {note}")
     add("")
