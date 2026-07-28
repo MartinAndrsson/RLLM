@@ -88,6 +88,11 @@ class ProblemAdapter(ABC):
     def fidelity_levels(self) -> list[Fidelity]:
         """Ordered cheap -> expensive rungs of the ladder."""
 
+    def readonly_paths(self) -> list[str]:
+        """Paths a run must not modify (typically the problem repository). The dispatcher fingerprints
+        these around every run and fails the session if one changes — see rllm/integrity.py."""
+        return []
+
     def base_config(self) -> dict[str, Any]:
         """Knob values applied to EVERY run before an experiment's own config (the current base recipe).
         Shown to the actor so it doesn't propose a knob value the base already uses (a no-op run)."""

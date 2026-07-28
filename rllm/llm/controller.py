@@ -109,7 +109,9 @@ def propose_and_review(actor: LLMBackend, reviewer: LLMBackend, adapter: Problem
     rungs = prompts.ladder_text(adapter.fidelity_levels())
     base = prompts.base_config_text(adapter.base_config())
     ident = {"actor": actor.name, "actor_model": getattr(actor, "model", None),
-             "reviewer": reviewer.name, "reviewer_model": getattr(reviewer, "model", None)}
+             "reviewer": reviewer.name, "reviewer_model": getattr(reviewer, "model", None),
+             # §7.5: a decision must be traceable to the exact instructions that produced it.
+             "prompt_revision": prompts.PROMPT_REVISION, "method_sha": prompts.method_sha()}
 
     reasons: list[str] | None = None
     proposal, specs = None, []

@@ -173,8 +173,11 @@ class ProblemBrief:
         overlap = set(self.permitted_task_changes) & set(self.forbidden_task_changes)
         if overlap:
             errs.append(f"knob(s) both permitted and forbidden: {sorted(overlap)}")
-        if self.adapter.name == "brief" and not (self.test_command and self.metrics_file):
-            errs.append("the generic 'brief' adapter needs both test_command and metrics_file")
+        if self.adapter.name == "brief" and not self.metrics_file:
+            errs.append("the generic 'brief' adapter needs metrics_file (where a run writes its numbers)")
+        # Whether a `test_command` is required depends on the mode — variant mode replaces it with a
+        # variant entry point — and only the adapter knows which variants exist, so that check lives in
+        # `rllm.cli validate` where both the brief and the adapter are in hand.
         return errs
 
     def is_solved(self, metrics: dict) -> bool:

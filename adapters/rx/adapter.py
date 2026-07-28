@@ -108,6 +108,12 @@ class RxAdapter(ProblemAdapter):
         self.rx_repo = rx_repo
         self.py = py
 
+    def readonly_paths(self) -> list[str]:
+        # The Rx adapter runs the repo's own run_tqc_deep.sh, which writes into rx_sb3_runs/ inside the
+        # repo, so the tree legitimately changes: integrity checking is off for this adapter until its
+        # outputs are redirected under the harness's run_dir (README: known gaps).
+        return []
+
     def base_config(self) -> dict[str, Any]:
         return dict(BASE_CONFIG)
 

@@ -103,6 +103,11 @@ def main(argv=None):
     pr = sub.add_parser("propose"); pr.add_argument("work_dir"); pr.add_argument("-n", type=int, default=4)
     _add_llm_flags(pr)
 
+    cp = sub.add_parser("compare", help="the deliverable table; --by VARIANT compares designs")
+    cp.add_argument("work_dir"); cp.add_argument("--by", default=None, metavar="KNOB")
+    cp.add_argument("--fidelity", default=None)
+    cp.add_argument("--out", default=None, help="write the markdown here instead of stdout")
+
     hf = sub.add_parser("handoff"); hf.add_argument("work_dir")
     hf.add_argument("--session", default=None); hf.add_argument("--path-only", action="store_true")
 
@@ -144,6 +149,15 @@ def main(argv=None):
         print("(review-gated; nothing trains until you run `work` or `solve`)")
     elif args.cmd == "validate":
         _validate(args.work_dir)
+    elif args.cmd == "compare":
+        from rllm import compare
+        brief, adapter = _resolve(args.work_dir, require_brief=True)
+        text = compare.render(adapter, brief, args.work_dir, fidelity=args.fidelity, by=args.by)
+        if args.out:
+            Path(args.out).write_text(text + "\n")
+            print(f"wrote {args.out}")
+        else:
+            print(text)
     elif args.cmd == "handoff":
         _handoff(args)
     elif args.cmd == "ask":
@@ -243,6 +257,11 @@ def _validate(work_dir):
             problems.append(f"brief: success_criterion.required_fidelity "
                             f"{brief.success_criterion.required_fidelity!r} is not one of the adapter's "
                             f"rungs {sorted(rungs)}")
+        variants = getattr(adapter, "variants", lambda: [])()
+        if not variants and not brief.test_command.strip() and brief.adapter.name == "brief":
+            problems.append("nothing to run: no variants on disk and no test_command in the brief. "
+                            "Author a design under problems/<problem_id>/variants/ (see "
+                            "problems/README.md) or give the brief a test_command.")
         knobs = adapter.declared_knobs()
         for name in [*brief.permitted_task_changes, *brief.forbidden_task_changes]:
             if name not in knobs:
@@ -257,6 +276,9 @@ def _validate(work_dir):
         print(f"brief    : (none — using the built-in {adapter.name!r} adapter)")
     print(f"adapter  : {adapter.name}, {len(adapter.declared_knobs())} knobs declared, "
           f"rungs {[f.name for f in adapter.fidelity_levels()]}")
+    designs = getattr(adapter, "variants", lambda: [])()
+    if designs:
+        print(f"designs  : {len(designs)} variant(s) — {', '.join(designs)}")
     print("knobs the actor may propose:")
     print(knob_table(adapter))
     if problems:

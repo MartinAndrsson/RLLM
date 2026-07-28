@@ -13,14 +13,23 @@ itself is still launched by hand.
 ```
 rllm/            core library (general, problem-agnostic)
   interfaces.py    ProblemAdapter ABC + Fidelity/KnobSpec/ExperimentSpec/RunResult
+  brief.py         the frozen per-problem contract (metric, success criterion, budget, guard rails)
   validate.py      THE authorization layer: knob whitelist, slug/type/range checks, task-change gate
+  integrity.py     proof the problem repo was not modified by a run
+  session.py       bounded escalating sessions; budget.py enforces the caps
+  report.py        the handoff; compare.py the deliverable comparison table
   registry.py      durable JSON record of specs + results (shared-FS, resume-safe)
   dispatcher.py    NFS-queue multi-machine claim/run/report + worker loop
   ladder.py        coarse-to-fine (screen -> refine -> confirm) promotion
   llm/             actor/reviewer loop: backend.py (claude/codex CLIs), prompts.py, controller.py
   cli.py           `python -m rllm.cli ...`
-adapters/rx/     first adapter: wraps Supply/Rx_dan/supply run_tqc_deep.sh knobs
-  rllm_work/       per-problem MEMORY (read first): problem.md, journal.md, registry/, queue/, runs/
+adapters/
+  brief_adapter.py generic adapter: runs variants, or a brief-declared test command
+  rx/              hand-written adapter for Supply/Rx_dan/supply run_tqc_deep.sh knobs
+  rx/rllm_work/    per-problem MEMORY (read first): brief.json, problem.md, journal.md, sessions/
+problems/        THE DESIGNS the models write: <problem_id>/variants/<variant>/train.py
+                 (observation + action space + reward, importing the problem repo read-only)
+METHOD.md        standing research instructions, loaded into every prompt, hashed into every decision
 tests/           the gate tests (`python -m pytest tests -q`) — run these before any unattended session
 slides/          beamer template for generated reports
 ```
@@ -57,12 +66,25 @@ python -m rllm.cli promote $WD --from screen --to refine --top-k 3
 Multi-machine: run `work` (or `solve`) on each machine — they share the NFS queue. `propose` only ever
 *enqueues*, so the review gate always precedes GPU time.
 
+## The designs live here, not in your repo
+The observation, the action space and the reward are the models' design work. Each design is a directory
+under `problems/<problem_id>/variants/<name>/` **in this repo**, importing the problem repo as a read-only
+simulator and evaluating with the user's own test — contract in [problems/README.md](problems/README.md),
+skeleton in `problems/_template/`. `VARIANT` becomes a declared enum knob whose choices are the designs
+on disk, so a design is searched, gated and ranked exactly like a hyperparameter, and
+`rllm.cli compare --by VARIANT` gives the design-against-design table.
+
+The problem repo is never modified, and that is checked rather than trusted: `rllm/integrity.py`
+fingerprints it (git revision + working-tree state, or a file walk) around every run and fails the run
+**and the session** if anything moved.
+
 ## Onboarding a new problem
-No Python needed. The interview asks for a repo, a command that runs one evaluation, and the JSON file
-that command writes; `adapters/brief_adapter.py` turns those answers into runs. The only fiddly part is
-declaring which knobs may be tuned, with types and ranges — copy [docs/knobs.example.json](docs/knobs.example.json),
-or use the prompt in START_HERE.md to have a model draft it from the repo. The built-in Rx adapter
-(`adapters/rx/`) is what a hand-written adapter looks like when the problem needs one.
+No Python needed for the harness itself. The interview asks for the repo, the deterministic test, the
+metric and the guard rails; `adapters/brief_adapter.py` turns those answers into runs — either by running
+a variant, or (simplest case) by running a `test_command` the repo already has. Copy
+[docs/knobs.example.json](docs/knobs.example.json) for the knob declarations, or use the prompt in
+START_HERE.md to have a model draft them and a first variant from a paragraph of description. The
+built-in Rx adapter (`adapters/rx/`) is what a hand-written adapter looks like when a problem needs one.
 
 ## What authorizes what
 Models advise; deterministic code authorizes (implementations.md §2.1). Every proposal passes
@@ -87,10 +109,17 @@ Backends run with no ability to act: claude with `--tools ""`, codex with `--san
 2. **[done]** LLM propose + Codex review, gated by the deterministic knob whitelist + `tests/`.
 3. **[done]** Frozen problem brief, onboarding interview, generic brief-driven adapter.
 4. **[done]** Bounded budgeted sessions with escalation, handoff report, resume.
-5. **[next]** Live progress monitoring + conservative mid-run cancellation; statistical confirmation
-   (confidence intervals, fresh confirmation seeds); proxy-validity guard; beamer report generation.
+5. **[done]** METHOD.md as standing instructions; variants (model-authored observation/action/reward)
+   as a searchable dimension; read-only enforcement of the problem repo; comparison tables.
+6. **[next]** The variant *authoring* loop — a model writing a new design mid-session, reviewed by the
+   second model before it can run. Today a variant is authored out-of-band (START_HERE.md prompt B) and
+   the session only *selects between* the designs already on disk.
+7. Live progress monitoring + conservative mid-run cancellation; statistical confirmation (confidence
+   intervals, fresh confirmation seeds); proxy-validity guard; beamer report generation.
 
-Known gaps before leaving it unattended overnight (implementations.md §15): there is no progress-based
-cancellation of a bad run mid-flight, `~device-hours` is approximated by run wall-clock rather than
-measured, the external Rx runner's git revision is not yet hashed into each RunSpec, and concurrency is
-one run per worker process.
+Known gaps before leaving it unattended overnight (implementations.md §15): no progress-based
+cancellation of a bad run mid-flight; `~device-hours` approximated by run wall-clock rather than
+measured; one run per worker process; the integrity guard detects modification after a run rather than
+preventing it (a container or read-only mount is the next step up); and it is disabled for the Rx adapter
+specifically, because `run_tqc_deep.sh` writes its outputs inside the problem repo — that adapter needs
+its outputs redirected under the harness `run_dir` before the guard can be turned on for it.

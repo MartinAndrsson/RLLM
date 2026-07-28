@@ -6,11 +6,42 @@ duplication, and unsafe/over-eager decisions before any compute is spent.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from functools import lru_cache
+from pathlib import Path
 
 _JSON_ONLY = "Respond with ONLY a single JSON object, no prose, no code fences."
 
-PROPOSE_SYSTEM = (
+METHOD_PATH = Path(__file__).resolve().parent.parent.parent / "METHOD.md"
+PROMPT_REVISION = 3          # bump when a prompt template changes; recorded in the decision log (§7.5)
+
+
+@lru_cache(maxsize=1)
+def method_text() -> str:
+    """The standing research instructions (METHOD.md), injected into every actor/reviewer system prompt.
+
+    Method lives in a file rather than in these strings so it can be edited, reviewed and diffed without
+    touching code — and so the exact wording behind any decision is recoverable from its hash."""
+    try:
+        return METHOD_PATH.read_text().strip()
+    except OSError:
+        return ""
+
+
+@lru_cache(maxsize=1)
+def method_sha() -> str:
+    return hashlib.sha256(method_text().encode()).hexdigest()[:12] if method_text() else "none"
+
+
+def _with_method(system: str) -> str:
+    """Append the standing method to a role's system prompt. The role comes first: METHOD.md is how to
+    do the work, the role is what this particular call must return."""
+    method = method_text()
+    return f"{system}\n\n===== STANDING RESEARCH METHOD (METHOD.md) =====\n{method}" if method else system
+
+
+PROPOSE_SYSTEM_ROLE = (
     "You are an RL research planner for an automated experimentation harness. "
     "You propose the next batch of experiments to try on a problem, given its living memory "
     "(problem.md = understanding + realism constraints; journal.md = what's been tried, results, and "
@@ -21,7 +52,7 @@ PROPOSE_SYSTEM = (
     + _JSON_ONLY
 )
 
-REVIEW_SYSTEM = (
+REVIEW_SYSTEM_ROLE = (
     "You are an adversarial reviewer for an automated RL harness. Independently critique a proposed "
     "batch of experiments BEFORE any compute is spent. Block clearly wasteful, duplicate, unsafe, or "
     "realism-violating proposals; ask to revise ONLY when the fix is something the proposal itself can "
@@ -36,7 +67,7 @@ REVIEW_SYSTEM = (
 )
 
 
-HANDOFF_SYSTEM = (
+HANDOFF_SYSTEM_ROLE = (
     "You are writing the end-of-session handoff for an automated RL experimentation harness. The "
     "exploration window the human granted has ended. Your job is to tell that human, honestly and "
     "concisely, what was learned and what should happen next.\n"
@@ -47,13 +78,20 @@ HANDOFF_SYSTEM = (
     "grant yourself more time: 'more_time' is a request for the human to approve. " + _JSON_ONLY
 )
 
-HANDOFF_REVIEW_SYSTEM = (
+HANDOFF_REVIEW_SYSTEM_ROLE = (
     "You are the adversarial reviewer of an end-of-session handoff written by another model. Check it "
     "against the evidence: is any claim overstated, is success claimed without full-fidelity multi-seed "
     "evidence, is a known caution (seed variance, late convergence, cheap-proxy transfer) ignored, is "
     "the recommendation consistent with the numbers, and are the proposed next experiments actually "
     "informative? Approve only if a human could act on it safely. " + _JSON_ONLY
 )
+
+
+# Exported system prompts = role + standing method. Every model call in the harness uses one of these.
+PROPOSE_SYSTEM = _with_method(PROPOSE_SYSTEM_ROLE)
+REVIEW_SYSTEM = _with_method(REVIEW_SYSTEM_ROLE)
+HANDOFF_SYSTEM = _with_method(HANDOFF_SYSTEM_ROLE)
+HANDOFF_REVIEW_SYSTEM = _with_method(HANDOFF_REVIEW_SYSTEM_ROLE)
 
 
 def handoff_user(brief, evidence: dict, terminal_reason: str, memory_text: str) -> str:

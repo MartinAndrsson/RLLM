@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from . import integrity
 from .interfaces import ProblemAdapter, RunResult
 from .registry import Registry, _atomic_write_json
 
@@ -62,14 +63,22 @@ class Queue:
         return len(list((self.root / "pending").glob("*.json")))
 
 
-def run_process_group(cmd: list[str], timeout: float | None) -> tuple[int, bool]:
+def run_process_group(cmd: list[str], timeout: float | None,
+                      log_path: str | Path | None = None) -> tuple[int, bool]:
     """Run `cmd` in its own process group and enforce a HARD timeout on it.
 
     The training command is `bash -c "... python train.py ..."`, so killing just the direct child would
     orphan the trainer and let it keep burning the GPU past the session deadline. We therefore start a
     new session (new process group) and signal the whole group: SIGTERM (a chance to checkpoint), then
     SIGKILL. Returns (returncode, timed_out)."""
-    proc = subprocess.Popen(cmd, start_new_session=True)
+    log = open(log_path, "wb") if log_path else None
+    try:
+        proc = subprocess.Popen(cmd, start_new_session=True, stdout=log or None,
+                                stderr=subprocess.STDOUT if log else None)
+    except BaseException:
+        if log:
+            log.close()
+        raise
     try:
         return proc.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
@@ -83,6 +92,20 @@ def run_process_group(cmd: list[str], timeout: float | None) -> tuple[int, bool]
     except BaseException:                                   # Ctrl-C / SystemExit must not orphan a run
         _signal_group(proc, signal.SIGTERM)
         raise
+    finally:
+        if log:
+            log.close()
+
+
+def _tail(path: str | Path, lines: int = 12, limit: int = 2000) -> str:
+    """Last few lines of a run's captured output, for the failure record."""
+    try:
+        text = Path(path).read_text(errors="replace").strip()
+    except OSError:
+        return "(no output captured)"
+    if not text:
+        return "(no output)"
+    return " / ".join(text.splitlines()[-lines:])[-limit:]
 
 
 def _signal_group(proc: subprocess.Popen, sig: int) -> None:
@@ -157,16 +180,32 @@ def _loop(adapter, queue, registry, runs_dir, device, dry_run, poll_seconds, max
         t0 = time.perf_counter()
         ok = True
         timeout = per_run_timeout(job["fidelity"]) if per_run_timeout else None
+        # The problem repo is a read-only simulator: the models' own environment/reward code lives in
+        # RLLM under problems/<id>/variants/. Fingerprint before, verify after — a run that edited the
+        # thing being measured invalidates this result and every later one, so it stops the session.
+        readonly = integrity.snapshot(adapter.readonly_paths())
+        log_path = Path(run_dir) / "run.log"
         try:
-            rc, timed_out = run_process_group(cmd, timeout)
+            rc, timed_out = run_process_group(cmd, timeout, log_path=log_path)
+            if readonly:
+                integrity.verify(readonly, context=f"run {job['job_id']}")
             if timed_out:
                 ok, metrics = False, {"error": f"run exceeded its {timeout:.0f}s hard timeout; "
                                                f"process group terminated"}
             elif rc != 0:
-                ok, metrics = False, {"error": f"command exited {rc}"}
+                # Without the output, a run that could not even start is indistinguishable from one that
+                # performed badly — and the next session has nothing to diagnose from.
+                ok, metrics = False, {"error": f"command exited {rc}: {_tail(log_path)}"}
             else:
                 metrics = adapter.parse_result(run_dir)
                 ok = "error" not in metrics
+        except integrity.ProblemRepoModified as exc:
+            registry.put_result(RunResult(
+                exp_id=job["exp_id"], seed=job["seed"], fidelity=job["fidelity"], run_dir=run_dir,
+                status="failed", metrics={"error": str(exc)},
+                wall_seconds=time.perf_counter() - t0))
+            queue._finish(job, False)
+            raise
         except Exception as exc:                                  # noqa: BLE001
             ok = False
             metrics = {"error": str(exc)}

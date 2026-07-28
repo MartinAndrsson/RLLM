@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import ladder
+from . import integrity, ladder
 from .brief import ProblemBrief, format_duration
 from .budget import STARTUP_OVERHEAD_SECONDS, Estimator, Ledger
 from .dispatcher import Queue, worker
@@ -166,6 +166,11 @@ class Session:
                 if self._stalled():
                     self._finish("stalled")
                     break
+        except integrity.ProblemRepoModified as exc:
+            # Every later result would be suspect, so this ends the session rather than the wave.
+            self.log(f"STOPPING: {exc}")
+            self.ledger.stopped_because.append(str(exc))
+            self._finish("failed")
         except KeyboardInterrupt:
             self.log("interrupted — winding down")
             self._finish("deadline_reached")
@@ -365,6 +370,11 @@ class Session:
         budget left, holding back the promotion reserve, and capped so one wave never eats the session."""
         by_time = self._max_jobs_that_fit(self.rungs[0])
         remaining = self.ledger.runs_remaining(self.budget)
+        if not self.estimator.is_observed(self.rungs[0]):
+            # Nothing has been timed yet, so every "does this fit before the deadline?" answer rests on
+            # the user's guess. Spend ONE run calibrating before committing a full wave to it: if the
+            # guess was 30m and the truth is 4h, this is the difference between one wasted run and four.
+            return min(1, by_time, remaining)
         # Hold back the promotion reserve, but never so much that no screening can start at all: with a
         # run cap below the reserve the session would otherwise do nothing whatsoever.
         reserve = min(self._promotion_reserve(), max(0, remaining - 1))
@@ -438,7 +448,9 @@ class Session:
             rec["source"] = f"actor={self.actor.name}, reviewer={self.reviewer.name}"
             rec["deterministic_view"] = fallback["recommendation"]
             llm_controller._log(self.work_dir, {"stage": "handoff", "session": self.state.session_id,
-                                               "terminal_reason": reason, "recommendation": rec})
+                                               "terminal_reason": reason, "recommendation": rec,
+                                               "prompt_revision": prompts.PROMPT_REVISION,
+                                               "method_sha": prompts.method_sha()})
             return rec
         except Exception as exc:                                    # noqa: BLE001
             fallback["note"] = f"models could not be consulted: {exc}"

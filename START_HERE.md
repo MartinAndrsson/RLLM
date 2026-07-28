@@ -22,42 +22,80 @@ That session plans a wave, runs it, promotes what survives, and repeats until th
 then writes `<work_dir>/sessions/<id>/handoff.md` telling you whether to grant more time, answer a
 question, or step in.
 
-## B. Ask a model to prepare it for you
+## B. Describe the problem in a paragraph and have a model prepare it
 
-For a brand-new repo the fiddly part is declaring which knobs may be tuned, with types and ranges.
-Paste this to Claude Code (or Codex) **inside the problem repo**:
+Write what you actually want, the way you would say it to a colleague:
+
+> I have a problem in this repo `/home/rxrepo` where an RL agent needs to learn to move empty rollboxes
+> around such that mail can always be sent. There are tests in `final_eval_dev.py` where the performance
+> of the RL agent is measured. The goal is to never run out of rollboxes in any sorting center, as that
+> is disastrous.
+
+Then paste that, plus the prompt below, to Claude Code **inside the problem repo**. It reads the repo and
+produces the two things the interview needs: the knob declarations, and the answers to paste in.
 
 ```text
-Read this repo and prepare it for the RLLM experimentation harness at
-/home/hep/maander/Supply/RLLM. Do not change any training code.
+<your paragraph here>
 
-1. Find the entry point that trains/evaluates one configuration, and the file it writes results to.
-   Tell me the exact command to run ONE run, given $SEED and an output directory $RUN_DIR, and the
-   JSON file (relative to $RUN_DIR) holding its metrics. If no such JSON exists, write the smallest
-   possible patch that emits one, and show it to me before applying it.
-2. List every knob that command reads (env vars, CLI flags, config keys), and for each give:
-   name, value_type (int/float/bool/string/enum), default, min/max or choices, and a category
-   (algorithm, hyperparameter, reward, observation, action, training_budget, evaluation,
-   task_definition). Anything that changes what "solved" means -- episode length, observability,
-   the scenario distribution -- must be category task_definition. Anything path-valued gets
-   llm_may_change=false. Prefer enum with explicit choices over free-form strings.
-3. Write that list as JSON in the shape of RLLM/docs/knobs.example.json, including a 3-rung
-   screen/refine/confirm ladder whose ONLY differences are training budget and seed count -- never
-   episode length or anything else that changes the problem.
-4. Tell me: the primary metric and whether it is maximized or minimized, a sensible secondary metric
-   for tie-breaks, roughly how long one short run takes, and which knobs I should forbid outright.
-5. Print the answers as a numbered list I can paste into ./scripts/rllm-onboard.sh, and save the knob
-   JSON to a file whose path you tell me.
+Prepare this repo for the RLLM harness at /home/hep/maander/Supply/RLLM.
 
-Do not run any training. Do not commit anything.
+HARD RULE: this repository is a read-only simulator. Do not modify a single file in it, and do not
+propose modifying it. Everything written for the harness lives in RLLM under
+problems/<problem_id>/variants/ and imports this repo. Read RLLM/problems/README.md first.
+
+1. Find (a) how one training run is launched, and (b) the deterministic test that measures
+   performance, including the exact function/CLI entry point and the metric names it reports. Quote
+   the signatures. If the test only prints numbers and cannot be called programmatically, say so --
+   the variant will parse its output rather than us changing the test.
+2. Draft ONE first variant in RLLM/problems/<problem_id>/variants/<name>/train.py that: builds the
+   env from this repo, defines the observation, action space and reward explicitly, trains, evaluates
+   using the test from step 1, and writes $RUN_DIR/metrics.json. Follow the contract in
+   RLLM/problems/README.md exactly (RUN_DIR, SEED, PROBLEM_REPO, knobs from the environment, write
+   nothing outside RUN_DIR). Keep the observation/action/reward visible in one file.
+3. List the knobs that variant reads, and for each: name, value_type (int/float/bool/string/enum),
+   default, min/max or choices, category (algorithm, hyperparameter, reward, observation, action,
+   training_budget, evaluation, task_definition). Anything that changes what "solved" means --
+   episode length, observability, the scenario distribution -- is task_definition. Path-valued knobs
+   get llm_may_change=false. Prefer enum with explicit choices over free-form strings.
+4. Write that as JSON in the shape of RLLM/docs/knobs.example.json, with a 3-rung
+   screen/refine/confirm ladder whose ONLY differences are training budget and seed count.
+5. Tell me: the primary metric and whether it is maximized or minimized, a secondary metric for
+   tie-breaks, any hard bound that must also hold, roughly how long one short run takes, and which
+   knobs I should forbid outright.
+6. Print the interview answers as a numbered list I can paste into ./scripts/rllm-onboard.sh.
+
+Do not run any training. Do not commit anything. Do not write outside RLLM/problems/.
 ```
 
-Then run the interview with that file to hand.
+Review the variant it wrote before starting a session — it is the design your results will be about.
+
+## What the models write, and where
+
+The observation, the action space and the reward are the models' design work, not fixed inputs. Each
+design is a directory under `problems/<problem_id>/variants/<name>/` **in this repo**, importing your
+repo as a read-only simulator and evaluating with your own test. See
+[problems/README.md](problems/README.md) for the contract.
+
+`VARIANT` is then just another declared knob whose choices are the designs on disk, so the search
+compares designs exactly as it compares hyperparameters:
+
+```bash
+python -m rllm.cli compare <work_dir> --by VARIANT     # design against design
+python -m rllm.cli compare <work_dir> --by ALGO        # or algorithm against algorithm
+```
+
+Your repo is never modified. The harness fingerprints it around every run (git revision plus
+working-tree state, or a file walk if it is not a git repo) and **fails the run and stops the session**
+if anything changed — because from that moment on, every number is suspect.
 
 ## What you are agreeing to when you start a session
 
 - The models **propose**; deterministic code **authorizes**. Every proposal passes a knob whitelist
   before it can reach a command line (`rllm/validate.py`, `tests/test_gates.py`).
+- **Your repo is read-only, and that is checked** — not merely requested (`rllm/integrity.py`,
+  `tests/test_variants.py`).
+- How the models work is set by [METHOD.md](METHOD.md), which is loaded into every prompt and whose hash
+  is recorded with every decision. Edit it to change their methodology.
 - The deadline, the run cap and the LLM-call cap are enforced outside the models. A model can only
   *request* more time, in the handoff.
 - Success is only ever claimed from the fidelity and seed count you specified — a good cheap-rung
